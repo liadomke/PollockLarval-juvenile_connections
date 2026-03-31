@@ -1,0 +1,59 @@
+species_tsn,common_name,scientific_name,lhs_code
+161105,"Fish, unident.",Teleost,U
+161105,"Fish, unident.",Teleost,L
+161975,Pink Salmon,Oncorhynchus gorbuscha,J
+161975,Pink Salmon,Oncorhynchus gorbuscha,I_M
+161976,Chum Salmon,Oncorhynchus keta,J
+161976,Chum Salmon,Oncorhynchus keta,I_M
+161977,Coho Salmon,Oncorhynchus kisutch,J
+161977,Coho Salmon,Oncorhynchus kisutch,I_M
+161979,Sockeye Salmon,Oncorhynchus nerka,J
+161979,Sockeye Salmon,Oncorhynchus nerka,I_M
+161980,Chinook Salmon,Oncorhynchus tshawytscha,J
+161980,Chinook Salmon,Oncorhynchus tshawytscha,I_M
+162035,Capelin,Mallotus villosus,U
+162035,Capelin,Mallotus villosus,A0
+162035,Capelin,Mallotus villosus,A1+
+162041,Rainbow Smelt,Osmerus mordax dentex,U
+162041,Rainbow Smelt,Osmerus mordax dentex,A0
+162041,Rainbow Smelt,Osmerus mordax dentex,A1+
+164706,Arctic Cod,Boreogadus saida,A0
+164706,Arctic Cod,Boreogadus saida,A1+
+164706,Arctic Cod,Boreogadus saida,U
+164708,Saffron Cod,Eleginus gracilis,A1+
+164708,Saffron Cod,Eleginus gracilis,A0
+164708,Saffron Cod,Eleginus gracilis,U
+164711,Pacific Cod,Gadus macrocephalus,A0
+164711,Pacific Cod,Gadus macrocephalus,A1+
+164711,Pacific Cod,Gadus macrocephalus,U
+166705,"Rockfish, unident.",Sebastes,U
+166705,"Rockfish, unident.",Sebastes,A0
+167111,Rock Greenling,Hexagrammos lagocephalus,U
+167111,Rock Greenling,Hexagrammos lagocephalus,A0
+167120,Atka Mackerel,Pleurogrammus monopterygius,U
+167120,Atka Mackerel,Pleurogrammus monopterygius,A0
+167123,Sablefish,Anoplopoma fimbria,A0
+167123,Sablefish,Anoplopoma fimbria,U
+171671,"Sand lance, unident.",Ammodytes sp.,U
+171671,"Sand lance, unident.",Ammodytes sp.,A0
+171672,Arctic Sand Lance,Ammodytes hexapterus,U
+171672,Arctic Sand Lance,Ammodytes hexapterus,A1+
+171672,Arctic Sand Lance,Ammodytes hexapterus,A0
+172702,Flatfish unident.,Pleuronectiformes,U
+172702,Flatfish unident.,Pleuronectiformes,L
+172862,Arrowtooth Flounder,Atheresthes stomias,U
+172862,Arrowtooth Flounder,Atheresthes stomias,A0
+172876,Bering Flounder,Hippoglossoides robustus,U
+172876,Bering Flounder,Hippoglossoides robustus,A0
+172911,Longhead dab,Limanda proboscidea,U
+172911,Longhead dab,Limanda proboscidea,L
+172930,Greenland Halibut,Reinhardtius hippoglossoides,U
+172930,Greenland Halibut,Reinhardtius hippoglossoides,L
+551209,Pacific Herring,Clupea pallasi,U
+551209,Pacific Herring,Clupea pallasi,A1+
+551209,Pacific Herring,Clupea pallasi,A0
+934083,Pollock,Gadus chalcogrammus,A0
+934083,Pollock,Gadus chalcogrammus,A1+
+934083,Pollock,Gadus chalcogrammus,U
+934083,Pollock,Gadus chalcogrammus,A1
+934083,Pollock,Gadus chalcogrammus,A2+

@@ -1,0 +1,252 @@
+---
+title: "Sampling_w_replacement_Pollock_lngs"
+output: html_document
+date: "2026-03-17"
+editor_options: 
+  chunk_output_type: console
+---
+
+Based off of conversations with Matt and Curry: 
+
+We have a subset of the total catch of age-0 pollock that are measured for SL each station/year in the NBS/SEBS
+We want to assign lengths to the rest of the catch ("catch-weighting") so that we can account for the 
+proportion of fish that we sampled (i.e., catch numbers) and get a true distribution of lengths of fish that were 
+sampled and counted at each station. 
+
+A way to do this is to use "sample" in base R
+take the known lengths (length) and the number of unknown lengths (total catch number - number of sampled lengths)
+sample(x = lengths, size = catch_number - measured_number, replace = TRUE)
+
+However, this is assigning lengths based on the sample proportion and those simulated numbers will change with each re-run of "sample"
+A way to deal with this is to bootstrap this sample procedure (by station/year) and obtain a sense of the 
+variability of the data. If all we cared about was the mean length we could average the bootstrapped length assignment, 
+but we want to use the assigned lengths as input for a spatiotemporal model like sdmTMB. 
+
+Ideally - we would use these bootstrapped data and EACH TIME we bootstrapped the data we would REFIT the sdmTMB model 
+to see how the variable the output of that model is (e.g., variability in terms of parameter estimates etc). However, this in particular, feels 
+infesiable to do for every station every year. 
+
+This sample procedure will likely be pretty consistent in assignment across bootstraps if the number of sampled/measured fish is large in proportion to the number of unsampled/measured fish (e.g., if we measured 50 fish and there are only 25 unmeasured fish). However, it may be more variable if the ratio of unsampled/measured fish is high (e.g., if we measured 50 fish and there are 1000 unmeasure fish). 
+
+Therefore, instead of bootstrapping all stations all years we could look at a few instances of mean/sd lengths depending on the proportion of unsampled/measured fishes. 
+
+```{r}
+library(tidyverse)
+library(purrr)
+```
+
+
+Downstream questions I have after we've assigned the length to the catch numbers:
+- what to do about instances where we have no length subsamples, but we DO have catch numbers for our sdmTMB model.
+
+Points to consider - pollock were clearly there (becasue of the positive catch), but there's no length to base the extrapolation on? 
+How do we deal with this in the model? Pretend like the station wasn't sampled? 
+
+- Right now the catch weight data I'm reading in below does NOT include all the catch data but only includes catch where we have subsampled lengths for
+
+```{r}
+catch <- read.csv("Data/a0pollock_catch_w_length_samples.csv")
+lngs <- read.csv("Data/a0pollock_corrected_lngs.csv")
+```
+
+
+Steps - 
+1. look at how many length samples are at each sampling event (station) and what proportion of the catch those represent
+2. set up a bootstrap of the sample() with replacement function that calculates mean and sd of the TOTAL sample related to the proportion of unsampled catch
+Therefore looking at a few instances of mean/sd lengths depending on the proportion of unsampled/measured fishes. 
+
+# 1. Proportion of sample/unsampled
+
+```{r}
+nrow(lngs)
+nrow(catch)
+
+# we have a couple db issues where some lengths were included or not included well fix them here until the db fix gets pushed
+cor.lng <- 0.29353 + 0.92359*93 # length of the fish in the origiinal records
+lngs <- lngs %>%
+  mutate(corrected_length = ifelse(is.na(corrected_length) & station_id == "20060201015",
+                                   cor.lng, corrected_length)) %>%
+  filter(!(is.na(corrected_length & station_id == "20100501004")))
+
+# get sample sizes from lng samples
+lng.sample.size <- lngs %>%
+  group_by(station_id) %>%
+  dplyr::summarise(num_lng = n()) # 1139
+
+catch_prop <-left_join(catch, lng.sample.size) %>%
+  mutate(total_catch_number = ifelse(station_id == "20110304024" & total_catch_number == 39, 40, total_catch_number)) %>%
+  group_by(station_id) %>%
+  mutate(proportion_sampled = num_lng / total_catch_number) %>%
+  mutate(station_id = as.character(station_id))
+
+# visualize it
+range(catch_prop$proportion_sampled) # okay good we dont have more than 1 
+
+more.lng.than.catch <- filter(catch_prop, proportion_sampled > 1) # okay this is an instance of 40 lng in the specimen records and 39 in the catch 
+# to be honest I will change this (above) to make it match our lng records cause those were the touched fish
+# this likely will mess up weights but we're not using that so its okay
+filter(catch_prop, station_id == "20110304024") # dyson survey
+
+hist(catch_prop$proportion_sampled) # okay looking at this there's mainly low proportion of catch sampled (and a few instances of 1:1 where every fish was measured
+# and we won't be bootstrapping over)
+
+# now we have fewer instances (780 obs) where we need to bootstrap over yay! 
+catch_prop_sub <- filter(catch_prop, proportion_sampled != 1)
+table(catch_prop_sub$sample_year)
+# okay here we have the number of stations by years that we'll be resample/extrapolating over
+```
+
+2. set up a bootstrap of the sample() with replacement function that calculates mean and sd of the TOTAL sample related to the proportion of unsampled catch
+Therefore looking at a few instances of mean/sd lengths depending on the proportion of unsampled/measured fishes. 
+
+# 2. Bootstrap sample()
+
+sample(x = lengths, size = catch_number - measured_number, replace = TRUE)
+
+Using map and lists is faster than rebuilding the df using rbind, this still takes awhile to run 
+
+```{r}
+set.seed(033026)
+
+# Pre-split data to avoid repeated filtering
+lngs_split <- split(lngs, lngs$station_id)
+catch_split <- split(catch_prop_sub, catch_prop_sub$station_id)
+
+dataset_list <- map(names(catch_split), function(i) {
+  
+  # Extract relevant data for this station
+  lngs_i <- lngs_split[[i]]$corrected_length
+  catch_i <- catch_split[[i]]
+  
+  n_to_sample <- catch_i$total_catch_number - catch_i$num_lng
+  n_total <- catch_i$total_catch_number
+  
+  # Inner Loop: Use map_df to return a data frame directly
+  boot_df <- map_df(1:400, function(b) {
+    # Bootstrap sample (working with vectors, not data frames)
+    new_lngs <- sample(lngs_i, size = n_to_sample, replace = TRUE)
+    all_lngs <- c(new_lngs, lngs_i)
+    
+    # Calculate metrics
+    m <- mean(all_lngs)
+    s <- sd(all_lngs)
+    
+    # Return one row
+    data.frame(station_id = i, mean = m, sd = s, 
+               num = n_total, se = s/sqrt(n_total), 
+               bootstrap_it = b, sample_year = catch_i$sample_year)
+  })
+  
+  return(boot_df)
+})
+
+# Final assembly
+final_dataset <- bind_rows(dataset_list)
+```
+
+Now lets compare how the variable the means were
+
+so basically we want to know what the variability of the means by station adn proportion sampled
+```{r}
+tmp <- final_dataset %>%
+  group_by(station_id) %>%
+  dplyr::summarise(mean_sd = sd(mean),
+                   ) %>%
+  left_join(catch_prop)
+
+scale_means <- final_dataset %>%
+  group_by(station_id) %>%
+  dplyr::summarise(scaled_mean = scale(mean)) %>%
+  left_join(catch_prop)
+
+
+ggplot() +
+  geom_point(aes(x = proportion_sampled, y = mean_sd), data = tmp) +
+  labs(x = "Proportion of total catch subsampled and lengthed", y = "Standard deviation of bootstrapped means") +
+  theme_bw()
+
+range(tmp$mean_sd, na.rm = T)
+range(tmp$mean_sd)
+# why are there standard deviations that have NAs?
+test <-filter(tmp, is.na(mean_sd))
+
+# all of the means at these two stations were nas
+na.means<-subset(final_dataset, station_id %in% test$station_id)
+
+lng.nas <- subset(lngs, station_id %in% test$station_id) %>%
+  filter(is.na(corrected_length))
+
+catch.nas <- subset(catch_prop_sub, station_id %in% test$station_id)
+
+# okay we've identified the issues, we only have 55 measurements in 2010 which means
+# that someone just counted wrong and added in too many rows in specimen table 
+lng.2010 <- subset(lngs, cruise_id == "EE1001" & station_id == "20100501004")
+lng.2006 <- subset(lngs, station_id == "20060201015")
+
+```
+
+a couple of the bootstrapped points have mean_sd that are quite high ie above 1.25
+```{r}
+ggplot() +
+  geom_point(aes(x = proportion_sampled, y = mean_sd,
+                 fill = mean_sd > 1.25), data = tmp, pch = 21) +
+  labs(x = "Proportion of total catch subsampled and lengthed", y = "Standard deviation of bootstrapped means") +
+  theme_bw()
+
+high.variability <- filter(tmp, mean_sd > 1.25) # 7 stations with super variable standard deviatiosn of mean estimates
+
+
+range(tmp$proportion_sampled)
+range(high.variability$proportion_sampled) # surprisingly its not like the proportion sampled is all that low
+
+variable.lngs <- subset(lngs, station_id %in% c(high.variability$station_id))
+
+variable.lngs %>%
+  mutate(station_id = as.character(station_id)) %>%
+  group_by(sample_year, station_id) %>%
+  dplyr::summarize(low.range = min(corrected_length),
+                   high.range = max(corrected_length),
+                   num = n()) %>%
+  left_join(high.variability) %>%
+  dplyr::select(sample_year:mean_sd, lhs_code, common_name, total_catch_number, total_catch_weight, catch_notes, num_lng, proportion_sampled)
+
+# what if its not really the proportion sampled that causes the issues but the absolute number of lengths taken?
+
+ggplot() +
+  geom_point(aes(x = num_lng, y = mean_sd,
+                 fill = mean_sd > 1.25), data = tmp, pch = 21) +
+  labs(x = "Absolute number of lengths sampled", y = "Standard deviation of bootstrapped means") +
+  theme_bw()
+
+# this looks like the case. 
+# if we remove the points for the sake of scale does this still look okay
+tmp %>%
+  filter(mean_sd < 1.25) %>%
+  ggplot() +
+  geom_point(aes(x = num_lng, y = mean_sd)) +
+  labs(x = "Absolute number of lengths sampled", y = "Standard deviation of bootstrapped means") +
+  theme_bw() +
+  geom_smooth(aes(x = num_lng, y = mean_sd))
+
+
+tmp %>%
+  filter(mean_sd < 1.25) %>%
+  ggplot() +
+  geom_point(aes(x = proportion_sampled, y = mean_sd)) +
+  labs(x = "Proportion of total catch subsampled and lengthed", y = "Standard deviation of bootstrapped means") +
+  geom_smooth(aes(x = proportion_sampled, y = mean_sd)) +
+  theme_bw()
+```
+
+what if we looked at scaled mean values
+```{r}
+scale_means %>%
+  ggplot() +
+  geom_point(aes(x = proportion_sampled, y = scaled_mean[,1]))
+
+# honestly looks pretty decent if we sample more than 10% of the catch
+
+```
+
+
+

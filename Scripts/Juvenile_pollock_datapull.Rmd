@@ -1,0 +1,456 @@
+---
+title: "Juvenile_pollock_datapull"
+output: html_document
+date: "2026-03-02"
+editor_options: 
+  chunk_output_type: console
+---
+
+# libraries
+```{r}
+library(EMAdownload)
+library(tidyverse)
+library(marmap)
+library(mapdata)
+```
+
+
+We will want all pollock data both catch and length distributions from the BS surveys
+(both NBS and SEBS, for now) from primarily the surface trawl, but it could be worth it to compare some of the surface trawl data with the NETS156. However oblique (NETS) trawl does not happen in the NBS just SEBS
+
+```{r}
+gad_tax <- get_ema_taxonomy() %>%
+  filter(str_detect(scientific_name, "Gadus"))
+head(gad_tax) # tsn code for pollock 934083
+
+gadus.can.catch <- join_event_catch(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
+                 gear = "CAN", trawl_method = "S", catch0 = TRUE, tsn = 934083)
+
+gadus.nets.catch <- join_event_catch(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
+                 gear = "NETS156", trawl_method = "O", catch0 = TRUE, tsn = 934083)
+
+gadus.lengths <- join_event_fish(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
+                                 gear = c("CAN", "NETS156"), trawl_method = c("S", "O"), tsn = 934083)
+```
+
+Tasks for this script/exploration
+
+- make sure the trawl method is appropriate for the gear type (no S NETS etc)
+- convert lengths to SL for age0 sized pollock
+- check length histograms for misassigned lhs designations for smaller/larger lengths
+- look at length histograms for years with both CAN/NETS156 and see if they're comparable 
+
+For 2024:
+- look at length histograms from 2024 for evidence of bi/tri-modal distributions
+- create a station map of length distributions (2-paneled plot with map and then length distributions by station?)
+- Regress size on latitude
+
+Next steps?:
+- maybe see if you can use sdmTMB to get size corrected lengths
+? do you use all years data? 
+? do you catch weight data first?
+
+# check lng data
+```{r}
+unique(gadus.lengths[c("sample_year", "gear", "tow_type")]) # okay good
+
+unique(gadus.lengths$gear_performance)
+# two questionable tows, one in 2022 for CAN because the net was too deep initially for 10-12 min footrope was around 25 m (at least), large swells, sped up to get shallower
+# the other question tow was for NETS156 O in 2016 on Dyson because the doors in was used not HB?
+filter(gadus.lengths, gear_performance == "Q") %>%
+  distinct(sample_year, cruise_id, gear, gear_performance, tow_type, region, event_notes)
+# Okay so 2022 is def questionable and we have to think if this is something we want to include, however, the 2016 NETS seems like this is something that would impact the effort calculation - does it matter? And did it get address in the db?
+
+# what are the length types used:
+unique(gadus.lengths$length_type)
+table(gadus.lengths$length_type, gadus.lengths$sample_year)
+# before 2012 only total lengths were used, it looks like in 2014 the age0 shifted to SL
+# fork length ended up getting used for any pollock A1 and older
+table(gadus.lengths$length_type, gadus.lengths$lhs_code)
+# however, SL and TL got used for for age0s 
+```
+
+Ben Laurel provided conversions for Walleye pollock and Pacific cod (below) The conversions for Pollock (Gadus chalcogrammus) in the 30-100 mm range are:
+
+TL(mm) = -0.25145 +1.08123*SL(mm)
+
+SL(mm) = 0.29353 + 0.92359*TL(mm)
+
+```{r}
+gadus.lengths %>%
+  filter(length < 200) %>%
+  ggplot() +
+  geom_histogram(aes(x = length, fill = lhs_code))
+
+gadus.lengths %>%
+  filter(length < 200) %>%
+  ggplot() +
+  geom_density(aes(x = length, fill =  lhs_code), alpha = 0.7)
+```
+
+
+Couple questions come out of looking at the lhs designation
+# 1. what do we do with U lhs_codes
+Series of years 2014 - 2016 where U was used
+```{r}
+filter(gadus.lengths, lhs_code == "U") %>%
+  distinct(sample_year, cruise_id, station_id, gear, tow_type, region)
+# U stations are in both SEBS and NBS
+
+filter(gadus.lengths, lhs_code == "U") %>%
+  ggplot() +
+  geom_histogram(aes(x = length, fill = as.factor(sample_year)))
+# vary across size classes but mainly larger than 100 mm 
+
+filter(gadus.lengths, sample_year %in% c(2014:2016)) %>%
+  ggplot() +
+  geom_histogram(aes(x = length, fill = lhs_code)) +
+  facet_wrap(~sample_year) #+
+  #theme(text = element_text(size = 20))
+
+pollock_lhs_U <- filter(gadus.lengths, lhs_code == "U")
+# write.csv(pollock_lhs_U, "pollock_lng_Ulhs.csv")
+# is there catch data association with the U?
+
+catch.lngU <- subset(gadus.can.catch, station_id %in% pollock_lhs_U$station_id) %>%
+  filter(total_catch_number > 20)
+
+test <- unique(catch.lngU[c("station_id", "lhs_code", "total_catch_number")])
+# there are definitely stations where the lhs_code assignment was U and there was catch that also got assigned 
+# to U, and this includes instances with indivduals more than 20 individuals which again will 
+# definitely shift catch numbers for these years. 
+```
+
+Notes about U lhs_code assignment: gave those values to Andrew and he dug into the CLAMS export and for most stations this is likely a data entry issue that subcategory was not properly applied. 
+He will changes these data and update akfin when complete. This will also change the catch numbers
+
+Quick exploration to how many different species have multiple size classes in our database
+```{r}
+catch <- join_event_catch(start_year = 2003, end_year = 2025, gear = c("CAN", "Nor264", "NETS156", "MAR"),
+                          trawl_method = c("S", "D", "FP", "L", "M", "O", "S", "V"))
+
+cap_tax <- get_ema_taxonomy() %>%
+  filter(str_detect(scientific_name, "Mallotus"))
+
+capelin_lengths <- join_event_fish(start_year = 2003, end_year = 2025, gear = c("CAN", "Nor264", "NETS156", "MAR"),
+                          trawl_method = c("S", "D", "FP", "L", "M", "O", "S", "V"),
+                          tsn = 162035)
+
+catch.lhs <- unique(catch[c("species_tsn", "common_name", "scientific_name", "lhs_code")]) %>%
+  as.data.frame()
+
+multiple.lhs <-  catch.lhs %>%
+  arrange(common_name) %>%
+  group_by(species_tsn, common_name, scientific_name) %>%
+  dplyr::summarize(num = n()) %>%
+  filter(num > 1)
+
+species.w.multiple.lhs <- subset(catch.lhs, species_tsn %in% multiple.lhs$species_tsn) %>%
+  arrange(species_tsn)
+
+unique(species.w.multiple.lhs$species_tsn) %>% length()
+
+#write.csv(species.w.multiple.lhs, "species_w_multiple_lhs.csv")
+
+
+# how'd we end up with multiple lhs for capelin including age0 age 1 and U?
+capelin_lengths %>%
+  ggplot() +
+  geom_density(aes(x = length, fill =  lhs_code), alpha = 0.7)
+
+table(capelin_lengths$lhs_code, capelin_lengths$sample_year)
+  
+```
+
+
+# 2. nets/can length histograms
+- look at length histograms for years with both CAN/NETS156 and see if they're comparable 
+```{r}
+gadus.lengths %>%
+  #filter(length < 200) %>%
+  ggplot() +
+  geom_density(aes(x = length, fill =  gear), alpha = 0.7)
+# kinda looks like the can trawl and nets do a good job of sampling the below 200 mm size class, but that the nets starts to get larger fish <300 mm 
+
+gadus.lengths %>%
+  filter(length < 200) %>%
+  ggplot() +
+  geom_histogram(aes(x = length, fill =  gear), alpha = 0.7)
+
+gadus.lengths %>%
+  #filter(length < 200) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(sample_year), fill = gear), alpha = 0.7)
+
+gadus.lengths %>%
+  filter(gear == "NETS156") %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(sample_year), fill = lhs_code), alpha = 0.7)
+
+# okay i feel pretty good that the nets and the can trawl are sampling similar size classes. Just sometimes the nets data is capturing more fish that we'd miss when they swim deeper perhaps (as Alex and Adam are working on) when the water is warmer or the MLD is shifted?   
+```
+
+Look briefly for bi/trimodal distributions in our length data by year
+```{r}
+gadus.lengths %>%
+  filter(gear == "CAN" & tow_type == "S",
+         length < 200,
+         region == "SEBS") %>%
+  # lets look at the surface can trawls for fish smaller than 200 mm and just in the SEBS
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(sample_year), fill = lhs_code), alpha = 0.7)
+```
+
+# 2024 length distributions
+For 2024:
+- look at length histograms from 2024 for evidence of bi/tri-modal distributions
+- scatterplot of length and latitude?
+```{r}
+sebs.gadus <- gadus.lengths %>%
+  filter(gear == "CAN" & tow_type == "S",
+         length < 200,
+         region == "SEBS")
+
+sample.size <- sebs.gadus %>%
+  group_by(station_id, sample_year, species_tsn, common_name, scientific_name) %>%
+  dplyr::summarize(num = n())
+
+sebs.gadus %>%
+  filter(sample_year == 2024,
+         length < 100) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(station_id)))
+
+sebs.gadus %>%
+  filter(sample_year == 2024,
+         lhs_code == "A0") %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(station_id), fill = lhs_code))
+  
+# a few stations look like there might be a bimodial distribution, 25, 11, 08, maybe 03, 05, 02
+sebs.gadus %>%
+  filter(sample_year == 2024,
+         length < 150) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(stat = "binline", bins = 20, aes(x = length, y = as.factor(station_id)))
+
+
+## okay looking at just A0 (which look like they were appropriately assigned for the can surface trawl) lets 
+# look at the scatter plot of lengths against latitude
+
+# sample size
+sample.size24 <- sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  group_by(eq_latitude, sample_year, event_code, gear,
+           station_id, species_tsn, common_name, scientific_name, lhs_code,
+           length_type) %>%
+  dplyr::summarise(num = n())
+
+## length pltos
+
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(eq_latitude))) +
+  geom_text(data = sample.size24, aes(x = 100, y = as.factor(eq_latitude), label = num))
+
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(stat = "binline", bins = 20, aes(x = length, y = as.factor(eq_latitude)))
+
+
+
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  ggplot() +
+  geom_boxplot(aes(y = length, x = as.factor(eq_latitude), group = as.factor(eq_latitude))) +
+  coord_flip()
+
+
+# look at longitude
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(eq_longitude)))
+
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year == 2024) %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(eq_longitude), fill = as.factor(oceanographic_domain)))
+```
+
+
+# size by latitude
+- Regress size on latitude
+```{r}
+sample.no <- gadus.lengths %>%
+  filter(lhs_code == "A0",
+         sample_year == "2024",
+         gear == "CAN") %>%
+  group_by(sample_year, station_id, region, gear, tow_type) %>%
+  dplyr::summarise(num = n())
+
+gadus.lengths %>%
+  filter(lhs_code == "A0",
+         sample_year == "2024",
+         gear == "CAN") %>%
+  ggplot() +
+  geom_point(aes(x = length, y = reorder(as.factor(station_id), eq_latitude), color = region)) +
+  geom_text(aes(x = 110, y = as.factor(station_id), label = num, group = region), data = sample.no)
+
+gadus.lengths %>%
+  filter(lhs_code == "A0",
+         sample_year == "2024",
+         gear == "CAN") %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = reorder(as.factor(station_id), eq_latitude), fill = region)) +
+  geom_text(aes(x = 110, y = as.factor(station_id), label = num, group = region), data = sample.no)
+
+
+gadus.lengths %>%
+  filter(lhs_code == "A0",
+         sample_year == "2024") %>%
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = length, y = as.factor(eq_latitude), fill = region))
+
+
+
+range(sample.no$num)
+table(sample.no$num)
+hist(sample.no$num)
+```
+
+
+cpue  map of pollock catches for 2024
+
+- create a station map of length distributions (2-paneled plot with map and then length distributions by station?)
+```{r}
+usa <- map_data("world2Hires", region = "USA")
+ak <- filter(usa, subregion == "Alaska")
+
+```
+
+
+# 3. convert lng to sl 
+
+```{r}
+surface.gadus.lng <- filter(gadus.lengths, gear == "CAN" & tow_type == "S")
+
+table(surface.gadus.lng$length_type, surface.gadus.lng$length < 100) # no FL measurements below 100 mm
+# mainly a conversion between SL and TL for fish smaller than 100 
+
+table(surface.gadus.lng$length_type, (surface.gadus.lng$length > 100 & surface.gadus.lng$lhs_code == "A0"))
+# no FL measurements for "a0" fish that are bigger than 100, but about 820 fish that need to be converted 
+# from TL to SL that are larger than 100 mm 
+
+tricky.fish <-filter(surface.gadus.lng, length > 100 & lhs_code == "A0" & length_type == "TL") # 818 fish
+ggplot(tricky.fish) +
+  geom_histogram(aes(x = length, fill = lhs_code))
+
+# super bizarre looks like there are A0 classifications for fish > 100 mm well and above what we'd consider reasonable
+
+surface.gadus.lng %>%
+  #filter(length < 400) %>%
+  filter(lhs_code == "A0",
+       length > 100 #& length < 300
+       ) %>%
+  ggplot() +
+  geom_histogram(aes(x = length, fill = lhs_code), binwidth = 5) +
+  facet_wrap(~sample_year, scale = "free_y")
+```
+
+
+For now we're going to convert **all** the age-0 fish to to standard length even if they are bigger than the 100 mm cut off for the conversion formula we're using. 
+
+assumptions that we're making that we might be able to change later:
+1. that the conversion formula will work for fish greater than 100 mm
+2. that all the fish are correctly identified to the size/age category of age-0 correctly
+- we know that some of these fish aren't, but because we're catch weighting we need to keep the categories as is (until they're fixed/adjusted in the db)
+
+Pollock conversions (30 - 100 mm)
+
+TL(mm) = -0.25145 +1.08123*SL(mm)
+
+SL(mm) = 0.29353 + 0.92359*TL(mm)
+```{r}
+head(surface.gadus.lng)
+surface.poll <- filter(surface.gadus.lng, lhs_code == "A0")
+
+corrected.poll.a0 <- surface.gadus.lng %>%
+  filter(lhs_code == "A0") %>%
+  mutate(corrected_length = ifelse(length_type == "TL", 0.29353 + 0.92359*length, length))
+
+nrow(surface.poll); nrow(corrected.poll.a0) # same length good 
+```
+
+
+# 4. get right catch w/ lng
+
+subset the events we want from the lng data and connect it with the catch data
+```{r}
+a0.can.catch <- filter(gadus.can.catch, lhs_code == "A0")
+
+nrow(a0.can.catch); range(a0.can.catch$total_catch_number) # includes 0s and is 1953 rows long
+table(a0.can.catch$total_catch_number > 0) # 1233 positive catch numbers (i.e., we should have ~ the same number of stations with length samples)
+
+length(unique(corrected.poll.a0$station_id)) # 1139 instances where stations have length samples
+
+catch.sample.size <-table(a0.can.catch$sample_year, a0.can.catch$total_catch_number > 0)
+
+# heres a catch 0 and positive weight discrepancy & vice versa catchp ositive and weight 0
+discrepancy <- filter(a0.can.catch, total_catch_number == 0 & total_catch_weight != 0)
+discrepancy2 <- filter(a0.can.catch, total_catch_number != 0 & total_catch_weight == 0)
+# so total of ~22-24 records that won't match up with the length data
+
+positive.catch <- filter(a0.can.catch, !(total_catch_number == 0)) 
+
+event.info <- positive.catch %>%
+  dplyr::select(c(sample_year, cruise_id, event_code, station_id, master_station_name, region, gear, eq_latitude, eq_longitude, effort, effort_units)) %>%
+  distinct() # 1233
+```
+
+```{r}
+nrow(event.info); length(unique(corrected.poll.a0$station_id))
+
+anti_join(event.info, corrected.poll.a0) # 94 rows in event id that don't have corresponding length data
+# so this means there are 94 instances of positive catch that don't have length information
+anti_join(corrected.poll.a0, event.info) # no length data without catch information (which is what I'd expect)
+
+catch.wo.lng <- anti_join(event.info, corrected.poll.a0)
+table(catch.wo.lng$sample_year) # most of these instances are in 2003 (69), 2004 (15), 2005 (8), 2007 (1), 2023 (1)
+table(catch.wo.lng$region, catch.wo.lng$sample_year)
+
+
+filter(catch.wo.lng, sample_year == 2023)
+filter(catch.wo.lng, sample_year == 2005)
+
+# #       2003 2004 2005 2007 2023
+#   NBS    20   11    4    0    1
+#   SEBS   49    4    4    1    0
+# catch without length information
+```
+
+
+For now lets just ignore that there are catch events that we have no length information for and subset that catch data and move it all 
+into the next script where we'll catch-weight
+
+```{r}
+length(unique(corrected.poll.a0$station_id)) # 1139
+length(unique(a0.can.catch$station_id)) # 1953
+nrow(a0.can.catch) # 1953
+
+catch.w.lng <- subset(a0.can.catch, station_id %in% unique(corrected.poll.a0$station_id))
+
+nrow(catch.w.lng) # 1139 which matches the length of unique stations 
+
+#write.csv(catch.w.lng, "Data/a0pollock_catch_w_length_samples.csv", row.names = F)
+#write.csv(corrected.poll.a0, "Data/a0pollock_corrected_lngs.csv", row.names = F)
+```
+
