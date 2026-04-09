@@ -30,9 +30,14 @@ This sample procedure will likely be pretty consistent in assignment across boot
 
 Therefore, instead of bootstrapping all stations all years we could look at a few instances of mean/sd lengths depending on the proportion of unsampled/measured fishes. 
 
+# library
 ```{r}
 library(tidyverse)
 library(purrr)
+library(sdmTMB)
+library(sf)
+library(concaveman)
+library(visreg)
 ```
 
 
@@ -106,11 +111,13 @@ sample(x = lengths, size = catch_number - measured_number, replace = TRUE)
 Using map and lists is faster than rebuilding the df using rbind, this still takes awhile to run 
 
 ```{r}
-set.seed(033026)
-
 # Pre-split data to avoid repeated filtering
 lngs_split <- split(lngs, lngs$station_id)
 catch_split <- split(catch_prop_sub, catch_prop_sub$station_id)
+```
+
+```{r eval=FALSE, include=FALSE}
+set.seed(033026)
 
 dataset_list <- map(names(catch_split), function(i) {
   
@@ -147,7 +154,7 @@ final_dataset <- bind_rows(dataset_list)
 Now lets compare how the variable the means were
 
 so basically we want to know what the variability of the means by station adn proportion sampled
-```{r}
+```{r eval=FALSE, include=FALSE}
 tmp <- final_dataset %>%
   group_by(station_id) %>%
   dplyr::summarise(mean_sd = sd(mean),
@@ -186,7 +193,7 @@ lng.2006 <- subset(lngs, station_id == "20060201015")
 ```
 
 a couple of the bootstrapped points have mean_sd that are quite high ie above 1.25
-```{r}
+```{r eval=FALSE, include=FALSE}
 ggplot() +
   geom_point(aes(x = proportion_sampled, y = mean_sd,
                  fill = mean_sd > 1.25), data = tmp, pch = 21) +
@@ -236,17 +243,288 @@ tmp %>%
   labs(x = "Proportion of total catch subsampled and lengthed", y = "Standard deviation of bootstrapped means") +
   geom_smooth(aes(x = proportion_sampled, y = mean_sd)) +
   theme_bw()
-```
 
-what if we looked at scaled mean values
-```{r}
+
+# what if we looked at scaled mean values
 scale_means %>%
   ggplot() +
   geom_point(aes(x = proportion_sampled, y = scaled_mean[,1]))
 
-# honestly looks pretty decent if we sample more than 10% of the catch
+# honestly looks pretty decent if we sample around/more than 10% of the catch
 
 ```
 
+## 2.1 All lengths returned instead of summary statistics
 
+```{r}
+set.seed(033026)
+
+# Pre-split data to avoid repeated filtering
+lngs_split <- split(lngs, lngs$station_id)
+catch_split <- split(catch_prop_sub, catch_prop_sub$station_id)
+
+length_list <- map(names(catch_split), .progress = "Processing stations", function(i) {
+  
+  # Extract relevant data for this station
+  lngs_i <- lngs_split[[i]]$corrected_length
+  catch_i <- catch_split[[i]]
+  
+  n_to_sample <- catch_i$total_catch_number - catch_i$num_lng
+  n_total <- catch_i$total_catch_number
+  
+  # Inner Loop: Use map_df to return a data frame directly
+  boot_lengths <- map_df(1:20, function(b) {
+    # Bootstrap sample (working with vectors, not data frames)
+    new_lngs <- sample(lngs_i, size = n_to_sample, replace = TRUE)
+    #all_lngs <- c(new_lngs, lngs_i)
+    
+    # # Calculate metrics
+    # m <- mean(all_lngs)
+    # s <- sd(all_lngs)
+    
+    # Return one row
+    data.frame(station_id = i, 
+               sample_year = catch_i$sample_year,
+               bootstrap_it = b, 
+               length = c(new_lngs, lngs_i)
+               )
+  })
+  
+  return(boot_lengths)
+})
+
+# Final assembly
+length_dataset <- bind_rows(length_list)
+```
+
+how is this organized again?
+```{r}
+class(length_dataset)
+names(length_dataset)
+
+head(length_dataset)
+str(length_dataset)
+
+unique(length_list[[1]]$sample_year)# so each list of list is a specific station within a year that is 
+unique(length_list[[1]]$bootstrap_it) # boot strapped 20 times. 
+unique(length_list[[1]]$station_id)
+nrow(length_list[[1]])
+
+lngs_split$`20030101004`
+catch_split$`20030101004`$num_lng # 10 actual lengths
+catch_split$`20030101004`$total_catch_number # 20 in total sampled
+catch_split$`20030101004`$proportion_sampled # so half measured
+# i.e. for 20030101004 we should be estimating 10 additional lengths
+# so 20 * 20 (cause bootstrapping 20x) means for this station its 400 rows long
+
+length_list[1]
+ggplot((length_list[[1]])) +
+  geom_histogram(aes(x = length)) + 
+  facet_wrap(~bootstrap_it)
+```
+
+## 2.2 doy to lengths
+
+Get the doy data added in with the length data
+```{r}
+
+# add julian day to catch data
+catch2 <- catch_prop_sub %>%
+  mutate(date = as.Date(haul_date),
+         doy = yday(date),
+         station_id = as.character(station_id)) %>% 
+  dplyr::select(sample_year, station_id, eq_latitude, eq_longitude, date, doy)
+
+# whats the range in data, should we be including each doy or aggregate into weeks? 
+# weeks may be a good option if the sdm is taking a long time to run
+range(catch2$doy); max(catch2$doy) - min(catch2$doy) # survey data spans 54 days
+
+# for now lets just take the first iteration of the bootstrap to play with a "full" dataset of lengths
+length_it1 <- length_dataset %>%
+  filter(bootstrap_it == 1)
+
+# length_dat <- length_it1 %>%
+#   left_join(catch2, by = c("station_id", "sample_year")) %>%
+#   dplyr::select(-bootstrap_it)
+```
+
+
+# 3. sdmTMB w/ lengths
+
+Create all the parts you'll need to fit and predict the sdmTMB model:
+add utm to data, make mesh, create prediction grid
+
+```{r}
+# subset the length data to one iteration 
+length_dat <- length_it1 %>%
+  filter(sample_year %in% c(2018:2025)) %>%
+  left_join(catch2, by = c("station_id", "sample_year")) %>%
+  dplyr::select(-bootstrap_it)
+
+# add utm to data
+lng_utm <- length_dat %>%
+  #dplyr::select(sample_year, station_id, eq_latitude, eq_longitude) %>%
+  add_utm_columns(., ll_names = c("eq_longitude", "eq_latitude"),
+                  ll_crs = 4326, utm_names = c("X", "Y"), 
+                  units = "km") # uses crs 32602
+
+head(lng_utm)
+
+crs <- st_crs(lng_utm)
+# make mesh
+mesh <- make_mesh(lng_utm, c("X", "Y"), n_knots = 50)
+plot(mesh)
+# create prediction grid
+## create sf object
+lng_sf <- lng_utm %>%
+  ungroup() %>%
+  dplyr::select(c(X, Y, eq_latitude, eq_longitude)) %>%
+  mutate(X = X*1000, Y = Y*1000) %>% # convert to meters for crs 32602
+  st_as_sf(coords = c("X", "Y"), crs = 32602)
+
+## create convex hull
+convex <- concaveman(lng_sf, concavity = 3)
+
+## add buffer to edges
+convex_buff <- st_buffer(convex, dist = 15e3) # dist in meters (we think)
+plot(convex_buff) # looks about right
+
+## make grid
+# make grid, created a cell size of 10,000 x 10,000 m (10 x 10 km) with poitns in center
+# need to check units on this... 
+grid <- st_make_grid(convex_buff, cellsize = 10e3, what = "centers") %>%
+  st_intersection(convex_buff)
+
+## change back to df
+bs.grid <- do.call(rbind, st_geometry(grid)) %>%
+  as_tibble() %>% setNames(c("X", "Y")) %>%
+  # convert df m back to km
+  mutate(X = X/1e3, Y = Y/1e3)
+plot(bs.grid)
+
+## replicate df across years and include any other variables we inlcude in our fit of the model
+## i.e., depth tmeperature etc
+bs.grid.year <- replicate_df(bs.grid, "sample_year", unique(lng_utm$sample_year))
+
+bs.grid.year.doy <- replicate_df(bs.grid.year, "doy", unique(lng_utm$doy))
+```
+
+
+Now we can fit the sdmTMB model for lengths
+
+What should we be considering - Lauren rogers used a gaussian distribution for similar length data from the larval samples
+but its not a true normal distribution... 
+
+following rogers et al., they investigated interannual changes in mean size by fitting models with year as factor and extracting conditional year effects for day of year (mean sampling date)
+
+so i think what this means is that for each station we might need to include mean size? rather than all data? 
+```{r}
+# in order to 
+fit1 <- sdmTMB(
+  data = lng_utm,
+  # model formula
+  log(length) ~ 0 + s(doy, k = 5) + as.factor(sample_year),
+  # add mesh
+  mesh = mesh, 
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  time = "sample_year", 
+  # family important.... start with gaussian, then lognormal 
+  #family = gaussian(link = "identity"),
+  family = lognormal(link = "log"), 
+  spatial = "on",
+  # each year independentally estimated
+  spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = TRUE
+)
+```
+
+
+## model checks
+```{r}
+# check the standard checks that the model has
+sanity(fit1)
+
+# look at the  params
+tidy(fit1, "ran_pars")
+summary(fit1)
+
+# looking for approximately normal along the line
+lng_utm$resid <- residuals(fit1, type = "mle-mvn")
+qqnorm(lng_utm$resid)
+abline(0,1)
+# kinda looks less than great. log length + gaussian still not great
+# log normal looks worse
+
+
+# spatial residuals
+# here we're revuing the data to make sure we're not seeing patterns of clustering of
+# positive and negative residuals together
+ggplot() +
+  geom_point(data = lng_utm, aes(X, Y, color = resid)) +
+  scale_color_gradient2() +
+  facet_wrap(~sample_year)
+```
+
+```{r}
+#' est: fixed + spatial + spatiotemporal (use this for maps and indices)
+#' est_non_rf - fixed effects only, use this to understand the covariate-driven signal (in our case here this would
+#' be the temporal effects)
+#' omega_s - spatial random effects use this to see persistent spatial deviations 
+#' epsilon_st - spatiotemporal random effects, will tell you/show year-specific anomalies
+preds <- predict(fit1)
+head(preds)
+
+pred.grid <- predict(fit1, newdata = bs.grid.year, return_tmb_object = T)
+
+pred.grid2 <- predict(fit1, newdata = bs.grid.year.doy, return_tmb_object = T)
+get_index(pred.grid2) %>%
+  geom_point(aes(sample_year, est)) +
+  geom_errorbar(aes(sample_year, ymin = lwr, ymax = upr))
+
+visreg(fit1)
+```
+
+
+## set up for only real measured lngs
+```{r}
+head(lngs)
+
+lngs_corr_utm <- lngs %>%
+  mutate(date = as.Date(haul_date),
+         doy = yday(date)) %>%
+  dplyr::select(c(sample_year, doy, eq_latitude, eq_longitude, corrected_length)) %>%
+  add_utm_columns(., ll_names = c("eq_longitude", "eq_latitude"),
+                  ll_crs = 4326, utm_names = c("X", "Y"), 
+                  units = "km") # uses crs 32602
+  
+
+mesh.lng <- make_mesh(lngs_corr_utm, c("X", "Y"), n_knots = 50)
+plot(mesh.lng)
+```
+
+fit measured lengths
+```{r}
+fit.lng <- sdmTMB(
+  data = lngs_corr_utm,
+  # model formula
+  log(corrected_length) ~ 0 + s(doy, k = 5) + as.factor(sample_year),
+  # add mesh
+  mesh = mesh.lng, 
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  time = "sample_year", 
+  # family important.... start with gaussian, then lognormal 
+  family = gaussian(link = "identity"),
+  #family = lognormal(link = "log"), 
+  spatial = "on",
+  # each year independentally estimated
+  spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = TRUE
+)
+```
 
