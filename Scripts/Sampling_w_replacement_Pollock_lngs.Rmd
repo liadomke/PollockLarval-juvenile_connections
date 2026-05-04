@@ -38,6 +38,13 @@ library(sdmTMB)
 library(sf)
 library(concaveman)
 library(visreg)
+
+#getNOAABathy lines
+library(marmap)
+#for plotting maps and projections
+library(maps)
+library(mapdata)
+library(mapproj)
 ```
 
 
@@ -50,8 +57,68 @@ How do we deal with this in the model? Pretend like the station wasn't sampled?
 - Right now the catch weight data I'm reading in below does NOT include all the catch data but only includes catch where we have subsampled lengths for
 
 ```{r}
-catch <- read.csv("Data/a0pollock_catch_w_length_samples.csv")
-lngs <- read.csv("Data/a0pollock_corrected_lngs.csv")
+catch <- read.csv("Data/a0pollock_catch_w_length_samples_041326.csv")
+lngs <- read.csv("Data/a0pollock_corrected_lngs_041326.csv")
+
+# direct.lng <- join_event_fish(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
+#                               tsn = 934083, gear = "CAN", trawl_method = "S")
+# 
+# direct.lng.a0 <- filter(direct.lng, lhs_code == "A0")
+# # interestingly 
+# table(is.na(direct.lng.a0$length))
+```
+
+# spatial and bathy files
+```{r}
+# #read in Alaska polygon for mapping
+# US <- map_data("world2Hires",region="USA")
+# AK <- subset(US,subregion == "Alaska")
+# USSR <- map_data("world2Hires",region="USSR")
+# BS <- rbind(AK,USSR)
+# #transforms longitudes (you could also transform the longs in the data file)
+# BS$long <- BS$long-360
+# 
+# BS.crop <- filter(BS, long < -155, long > - 175,
+#                       lat < 65)
+# 
+# BS2 <- st_as_sf(BS, coords = c("long", "lat"), crs = 4326) %>%
+#   st_polygon
+
+# get maps data
+# bs_map <- maps::map("world2Hires", regions = c("USA:Alaska", "USSR"), 
+#                     fill = TRUE, plot = FALSE) %>%
+#   st_as_sf(crs = 26902) # i think its 4326, but also trying out 26902
+
+sf_use_s2(TRUE)
+
+# need to use world not world2hires cause that one is hella old and doesn't plot correctly
+bs_map <- maps::map("world", regions = c("USA:Alaska", "Russia"), 
+                    fill = TRUE, plot = FALSE, wrap = c(0, 360)) %>%
+  st_as_sf(crs = 4326) 
+
+# Use bounding box, have to add 360 to the bbox coords
+# xmin = 185 (-175), xmax = 202 (-155)
+bbox_360 <- st_bbox(c(xmin = 180, xmax = 210, ymin = 50, ymax = 68), 
+                    crs = st_crs(bs_map))
+
+# crop 
+# Using st_make_valid helps w/ messy polys
+bs_cropped <- bs_map %>% 
+  st_make_valid() %>% 
+  st_intersection(st_as_sfc(bbox_360)) %>%
+  st_transform(crs = 32602) # Move to UTM Zone 2N
+
+#read in bathymetry file.  
+bathline <- getNOAA.bathy(-180,-155,54,68)
+
+bathline.xyz <- as.xyz(bathline)
+
+# plot
+# ggplot() +
+#   geom_sf(data = bs_cropped, fill = "antiquewhite", color = "black") +
+#   theme_minimal() +
+#   geom_contour(data = bathline, mapping = aes(x = x + 360, y = y, z = z),
+#                breaks = c(-20, -50, -100))
 ```
 
 
@@ -66,12 +133,27 @@ Therefore looking at a few instances of mean/sd lengths depending on the proport
 nrow(lngs)
 nrow(catch)
 
+table(is.na(lngs$corrected_length))
+na.lngs <- filter(lngs, is.na(corrected_length))
+# In 2011 the specimen record said that there was an illogical length so it was deleted but the record kept
+#' 2012 it looks like possibily a stub record although not confirmed of a specimen that was enetered but not measured
+#' (was an arctic cod but go re-assigned post processing with a voucher sample)
+#' 2018 CLAMS broke and caused a lot of angst andrew tried to reconstruct it then but didn't work
+#' The NAs represent the number of samples that were collected, but no lengths and that the best we can do
+# write.csv(na.lngs, "Data/na_lengths_a0_pollock.csv")
+
+# SEPERATE FROM THE NAs above: 
 # we have a couple db issues where some lengths were included or not included well fix them here until the db fix gets pushed
 cor.lng <- 0.29353 + 0.92359*93 # length of the fish in the origiinal records
 lngs <- lngs %>%
   mutate(corrected_length = ifelse(is.na(corrected_length) & station_id == "20060201015",
                                    cor.lng, corrected_length)) %>%
-  filter(!(is.na(corrected_length & station_id == "20100501004")))
+  filter(!(is.na(corrected_length & station_id == "20100501004"))) %>%
+  # remove any remaining NAs
+  filter(!(is.na(corrected_length)))
+
+
+
 
 # get sample sizes from lng samples
 lng.sample.size <- lngs %>%
@@ -256,7 +338,7 @@ scale_means %>%
 
 ## 2.1 All lengths returned instead of summary statistics
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 set.seed(033026)
 
 # Pre-split data to avoid repeated filtering
@@ -298,7 +380,7 @@ length_dataset <- bind_rows(length_list)
 ```
 
 how is this organized again?
-```{r}
+```{r eval=FALSE, include=FALSE}
 class(length_dataset)
 names(length_dataset)
 
@@ -326,7 +408,7 @@ ggplot((length_list[[1]])) +
 ## 2.2 doy to lengths
 
 Get the doy data added in with the length data
-```{r}
+```{r eval=FALSE, include=FALSE}
 
 # add julian day to catch data
 catch2 <- catch_prop_sub %>%
@@ -354,7 +436,7 @@ length_it1 <- length_dataset %>%
 Create all the parts you'll need to fit and predict the sdmTMB model:
 add utm to data, make mesh, create prediction grid
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # subset the length data to one iteration 
 length_dat <- length_it1 %>%
   filter(sample_year %in% c(2018:2025)) %>%
@@ -418,12 +500,12 @@ but its not a true normal distribution...
 following rogers et al., they investigated interannual changes in mean size by fitting models with year as factor and extracting conditional year effects for day of year (mean sampling date)
 
 so i think what this means is that for each station we might need to include mean size? rather than all data? 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # in order to 
 fit1 <- sdmTMB(
   data = lng_utm,
   # model formula
-  log(length) ~ 0 + s(doy, k = 5) + as.factor(sample_year),
+  log(length) ~ 0 + s(doy) + as.factor(sample_year),
   # add mesh
   mesh = mesh, 
   # we want to fit a spatiotemporal model with iid so we need to say which is the time category
@@ -443,7 +525,7 @@ fit1 <- sdmTMB(
 
 
 ## model checks
-```{r}
+```{r eval=FALSE, include=FALSE}
 # check the standard checks that the model has
 sanity(fit1)
 
@@ -468,7 +550,7 @@ ggplot() +
   facet_wrap(~sample_year)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 #' est: fixed + spatial + spatiotemporal (use this for maps and indices)
 #' est_non_rf - fixed effects only, use this to understand the covariate-driven signal (in our case here this would
 #' be the temporal effects)
@@ -488,29 +570,56 @@ visreg(fit1)
 ```
 
 
-## set up for only real measured lngs
+# 3.1 Shipboard lng sdm
 ```{r}
 head(lngs)
 
 lngs_corr_utm <- lngs %>%
+  # for now we'll remove the na lengths but ideally we'll fix this on the db side so it won't be a prblem
+  filter(!(is.na(corrected_length))) %>%
   mutate(date = as.Date(haul_date),
          doy = yday(date)) %>%
-  dplyr::select(c(sample_year, doy, eq_latitude, eq_longitude, corrected_length)) %>%
+  
+  arrange(station_id) %>%
+  dplyr::select(c(sample_year, station_id, doy, eq_latitude, eq_longitude, corrected_length)) %>%
   add_utm_columns(., ll_names = c("eq_longitude", "eq_latitude"),
                   ll_crs = 4326, utm_names = c("X", "Y"), 
-                  units = "km") # uses crs 32602
+                  units = "km") # uses crs 32603
   
-
+# create mesh
 mesh.lng <- make_mesh(lngs_corr_utm, c("X", "Y"), n_knots = 50)
 plot(mesh.lng)
 ```
+
+Plot sample sizes
+```{r}
+lngs$station_name <- paste(plyr::round_any(lngs$eq_latitude,0.25),plyr::round_any(lngs$eq_longitude,0.25),sep="")
+
+
+lngs %>%
+  group_by(station_name) %>%
+  dplyr::mutate(sample.size = n(),
+                   ) %>%
+  ggplot() +
+  # note about longitude need to add 360 to deal with the funkiness at 180 intl date line
+  # ** in wgs, if in other crs i dunno
+  geom_hex(aes(eq_longitude + 360, eq_latitude, fill = sample.size, group = log(sample.size))) +
+  geom_sf(data = bs_cropped, fill = "gray", color = "black", inherit.aes = F) +
+  geom_contour(data = bathline, aes(x = x + 360, y = y, z = z),
+               breaks = c(-20, -50, -200), linewidth = 0.3, colour = "black") +
+  labs(fill = "Number of samples") +
+  viridis::scale_fill_viridis(option = "inferno") +
+  #coord_sf(crs="EPSG:3476",default_crs=sf::st_crs(4326),xlim=c(-175,-155),ylim=c(54,65)) +
+  theme_minimal()
+```
+
 
 fit measured lengths
 ```{r}
 fit.lng <- sdmTMB(
   data = lngs_corr_utm,
   # model formula
-  log(corrected_length) ~ 0 + s(doy, k = 5) + as.factor(sample_year),
+  log(corrected_length) ~ 0 + s(doy) + as.factor(sample_year),
   # add mesh
   mesh = mesh.lng, 
   # we want to fit a spatiotemporal model with iid so we need to say which is the time category
@@ -526,5 +635,285 @@ fit.lng <- sdmTMB(
   # species distributions
   anisotropy = TRUE
 )
+```
+
+
+```{r}
+sanity(fit.lng)
+
+# look at the  params
+tidy(fit.lng, "ran_pars")
+summary(fit.lng)
+
+# looking for approximately normal along the line
+lngs_corr_utm$resid <- residuals(fit.lng, type = "mle-mvn")
+qqnorm(lngs_corr_utm$resid)
+abline(0,1)
+# nto my favourite line there's a decent variability along it but none of the sanity checks seem to cause problems
+
+# spatial residuals
+# here we're revuing the data to make sure we're not seeing patterns of clustering of
+# positive and negative residuals together
+ggplot() +
+  geom_point(data = lngs_corr_utm, aes(X, Y, color = resid)) +
+  scale_color_gradient2() +
+  facet_wrap(~sample_year)
+
+```
+
+create prediction
+```{r}
+# create prediction grid
+## create sf object
+lng_corr_sf <- lngs_corr_utm %>%
+  ungroup() %>%
+  dplyr::select(c(X, Y, eq_latitude, eq_longitude)) %>%
+  mutate(X = X*1000, Y = Y*1000) %>% # convert to meters for crs 32602
+  st_as_sf(coords = c("X", "Y"), crs = 32602)
+
+## create convex hull
+convex <- concaveman(lng_corr_sf, concavity = 3)
+
+## add buffer to edges
+convex_buff <- st_buffer(convex, dist = 15e3) # dist in meters (we think)
+plot(convex_buff) # looks about right
+
+## make grid
+# make grid, created a cell size of 10,000 x 10,000 m (10 x 10 km) with poitns in center
+# need to check units on this... 
+grid <- st_make_grid(convex_buff, cellsize = 10e3, what = "centers") %>%
+  st_intersection(convex_buff)
+
+## change back to df
+bs.grid <- do.call(rbind, st_geometry(grid)) %>%
+  as_tibble() %>% setNames(c("X", "Y")) %>%
+  # convert df m back to km
+  mutate(X = X/1e3, Y = Y/1e3)
+plot(bs.grid)
+
+## replicate df across years and include any other variables we inlcude in our fit of the model
+## i.e., depth tmeperature etc
+bs.grid.year <- replicate_df(bs.grid, "sample_year", unique(lngs_corr_utm$sample_year))
+
+bs.grid.year.doy <- replicate_df(bs.grid.year, "doy", 249)
+```
+
+predict back to observations
+```{r}
+# takes awhile to run
+#visreg(fit.lng, "sample_year")
+
+#pred.grid <- predict(fit.lng, newdata = bs.grid.year.doy, return_tmb_object = T)
+
+median.doy <- lngs_corr_utm %>%
+  group_by(station_id) %>%
+  summarise(mean.doy = mean(doy)) %>%
+  summarise(med = median(mean.doy),
+            mean = mean(mean.doy)) # median doy is 249 mean is 250, aug 28th for non leap year days
+# extract visreg outputs, here' we're looking at interannual changes
+
+# vr <- visreg(fit.lng, xvar = "sample_year", cond=list(doy = 249),
+#        plot = FALSE, scale = "response")
+
+
+pred.lng <- predict(fit.lng, newdata = bs.grid.year.doy)
+
+# unsure why this has to happen by the Y (latitude) is off by 1000s
+pred.lng.sf <- pred.lng %>%
+  mutate(Y = Y,
+         X = X) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 32602) %>%
+  st_transform(., crs = 4326) 
+
+pred.lng.wgs <- pred.lng.sf %>%
+  st_shift_longitude() %>%
+  dplyr::mutate(lat = sf::st_coordinates(.)[,2],
+                lon = sf::st_coordinates(.)[,1])
+  
+
+# using the output from predict
+ggplot(pred.lng, aes(X, Y, fill = est)) +
+  scale_fill_viridis_c() +
+  geom_tile() +
+  facet_wrap(~sample_year, ncol = 4)
+
+
+# what might be helpful here too is the average spatial field 
+ggplot() +
+  geom_sf(data = bs_cropped, fill = "gray", color = "black", inherit.aes = F) +
+  # geom_contour(data = bathline, aes(x = x, y = y, z = z),
+  #              breaks = c(-20, -50, -200), linewidth = 0.3, colour = "black") +
+  geom_sf(mapping = aes(fill = omega_s, color = omega_s),
+          data = pred.lng.wgs, pch = 22) +
+  # geom_sf(mapping = aes(fill = omega_s), data = pred.lng.sf) +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c()
+```
+
+
+
+# 3.2 2024 SDM
+
+```{r}
+lngs24 <- lngs %>%
+  # for now we'll remove the na lengths but ideally we'll fix this on the db side so it won't be a prblem
+  filter(!(is.na(corrected_length))) %>%
+  filter(sample_year == "2024",
+         region == "SEBS") %>%
+  mutate(date = as.Date(haul_date),
+         doy = yday(date),
+         scaledoy = scale(doy, center = TRUE, scale = TRUE)) %>%
+  
+  arrange(station_id) %>%
+  dplyr::select(c(sample_year, station_id, doy, scaledoy, eq_latitude, eq_longitude, corrected_length)) %>%
+  add_utm_columns(., ll_names = c("eq_longitude", "eq_latitude"),
+                  ll_crs = 4326, utm_names = c("X", "Y") , 
+                  utm_crs = 26902, # trying a NAD83 error
+                  units = "km") # uses crs 32603
+  
+# create mesh
+mesh24 <- make_mesh(lngs24, c("X", "Y"), n_knots = 15)
+plot(mesh24)
+```
+
+```{r}
+lngs24$station_name <- paste(plyr::round_any(lngs24$eq_latitude,0.25),plyr::round_any(lngs24$eq_longitude,0.25),sep="")
+
+station.pts <- lngs24 %>%
+  group_by(station_name) %>%
+  dplyr::mutate(sample.size = n(),
+                   )
+  
+ggplot() +
+  # note about longitude need to add 360 to deal with the funkiness at 180 intl date line
+  # ** in wgs, if in other crs i dunno
+  geom_hex(aes(eq_longitude + 360, eq_latitude, fill = sample.size, group = log(sample.size)),
+           data = station.pts) +
+  geom_sf(data = bs_cropped, fill = "gray", color = "black", inherit.aes = F) +
+  geom_contour(data = bathline, aes(x = x + 360, y = y, z = z),
+               breaks = c(-20, -50, -200), linewidth = 0.3, colour = "black") +
+  labs(fill = "Log Number of samples") +
+  viridis::scale_fill_viridis(option = "inferno") +
+  #coord_sf(crs="EPSG:3476",default_crs=sf::st_crs(4326),xlim=c(-175,-155),ylim=c(54,65)) +
+  theme_minimal()
+```
+
+## create prediction grid
+```{r}
+# create prediction grid
+## create sf object
+lngs24.sf <- lngs24 %>%
+  ungroup() %>%
+  dplyr::select(c(X, Y, eq_latitude, eq_longitude)) %>%
+  mutate(X = X*1000, Y = Y*1000) %>% # convert to meters for crs 32602
+  st_as_sf(coords = c("X", "Y"), 
+           crs = 26902 )
+           #crs = 32602)
+
+## create convex hull
+convex <- concaveman(lngs24.sf, concavity = 3)
+
+## add buffer to edges
+convex_buff <- st_buffer(convex, dist = 15e3) # dist in meters (we think)
+plot(convex_buff) # looks about right
+
+## make grid
+# make grid, created a cell size of 10,000 x 10,000 m (10 x 10 km) with poitns in center
+# need to check units on this... 
+grid <- st_make_grid(convex_buff, cellsize = 10e3, what = "centers") %>%
+  st_intersection(convex_buff)
+
+## change back to df
+bs.grid <- do.call(rbind, st_geometry(grid)) %>%
+  as_tibble() %>% setNames(c("X", "Y")) %>%
+  # convert df m back to km
+  mutate(X = X/1000, Y = Y/1000)
+plot(bs.grid)
+
+## replicate df across years and include any other variables we inlcude in our fit of the model
+## i.e., depth tmeperature etc
+bs.grid.doy <- replicate_df(bs.grid, "scaledoy", 0) # between 235 and 236 is ~0
+
+# lngs24 %>%
+#   summarise(med = median(doy),
+#             mean = mean(doy)) 
+```
+
+## fit 2024 model
+because this is not a temporal model, basically what we want to do is use samples to create a spatial 
+extrapolation of length from 2024 while accounting for doy
+```{r}
+fit.lng24 <- sdmTMB(
+  data = lngs24,
+  # model formula
+  log(corrected_length) ~ s(scaledoy),
+  # add mesh
+  mesh = mesh24, # knot 15
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  # time = "sample_year", 
+  # family important.... start with gaussian, then lognormal 
+  family = gaussian(link = "identity"),
+  #family = lognormal(link = "log"), 
+  spatial = "on",
+  # each year independentally estimated
+  #spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = FALSE
+)
+
+run_extra_optimization(fit.lng24, newton_loops = 3)
+
+sanity(fit.lng24)
+summary(fit.lng24)
+tidy(fit.lng24)
+```
+
+
+```{r}
+# note we used a gaussian link identity for the length of this but log transformed it
+pred24 <- predict(fit.lng24, newdata = bs.grid.doy) %>%
+  mutate(Y = Y * 1000, 
+         X = X * 1000) # convert to meteres because sf assumes meters
+
+ggplot(pred24, aes(X, Y, fill = exp(est))) +
+  scale_fill_viridis_c() +
+  geom_tile() 
+
+
+bs_cropped_shift <- bs_cropped %>%
+  st_transform(crs = 4326) %>%
+  st_shift_longitude() #%>%
+  # st_crop(ymin = 54, ymax = 68, xmin = -180, xmax = -150)
+  
+
+pred24.sf <- st_as_sf(pred24, coords = c("X", "Y"), 
+                      crs = 32602
+                      #crs = 26902
+                      ) %>%
+  st_transform(crs = st_crs(bs_cropped_shift)) %>%
+  st_shift_longitude()
+
+st.pts.sf <- station.pts %>%
+  st_as_sf(coords = c("eq_longitude", "eq_latitude"), crs = 4326) %>%
+  st_transform(crs = st_crs(bs_cropped_shift)) %>%
+  st_shift_longitude()
+
+
+ggplot() +
+  geom_sf(aes(fill = exp(est), color = exp(est)), pch = 22, data = pred24.sf) +
+  scale_fill_viridis_c() + scale_color_viridis_c() +
+  geom_sf(data = bs_cropped_shift, fill = "gray", color = "black", inherit.aes = F) +
+  geom_contour(data = bathline.xyz, aes(x = V1 +360, y = V2, z = V3, label),
+               breaks = c(-20, -50, -70, -150), linewidth = 0.3, colour = "black") +
+  # geom_sf(aes(fill = sample.size, group = log(sample.size)), pch = 22,
+  #          data = st.pts.sf) +
+  theme_bw() +
+  # gets rid of the span between the edge of the plot and axes
+  coord_sf(xlim = c(185, 202), ylim = c(54, 61), expand = FALSE, crs = 4326) +
+  labs(x = "Longitude", y = "Latitude", color = "Predicted length (mm)", fill = "Predicted length (mm)")
+
+
 ```
 

@@ -450,7 +450,7 @@ catch.w.lng <- subset(a0.can.catch, station_id %in% unique(corrected.poll.a0$sta
 
 nrow(catch.w.lng) # 1139 which matches the length of unique stations 
 
-#write.csv(catch.w.lng, "Data/a0pollock_catch_w_length_samples.csv", row.names = F)
-#write.csv(corrected.poll.a0, "Data/a0pollock_corrected_lngs.csv", row.names = F)
+# write.csv(catch.w.lng, "Data/a0pollock_catch_w_length_samples_041326.csv", row.names = F)
+# write.csv(corrected.poll.a0, "Data/a0pollock_corrected_lngs_041326.csv", row.names = F)
 ```
 
