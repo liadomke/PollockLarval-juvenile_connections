@@ -905,7 +905,7 @@ ggplot() +
   geom_sf(aes(fill = exp(est), color = exp(est)), pch = 22, data = pred24.sf) +
   scale_fill_viridis_c() + scale_color_viridis_c() +
   geom_sf(data = bs_cropped_shift, fill = "gray", color = "black", inherit.aes = F) +
-  geom_contour(data = bathline.xyz, aes(x = V1 +360, y = V2, z = V3, label),
+  geom_contour(data = bathline.xyz, aes(x = V1 +360, y = V2, z = V3),
                breaks = c(-20, -50, -70, -150), linewidth = 0.3, colour = "black") +
   # geom_sf(aes(fill = sample.size, group = log(sample.size)), pch = 22,
   #          data = st.pts.sf) +
