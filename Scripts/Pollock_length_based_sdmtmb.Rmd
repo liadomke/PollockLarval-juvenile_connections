@@ -1,0 +1,678 @@
+---
+title: "Pollock_length_based_sdmtmb"
+output: html_document
+date: "2026-10-28"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We explored using sampling with replacement to get a sense of both the total number of individuals of each size sampled at the different stations in the EBS. Essentially it would incorporate both the abundance information and length information in the same place. 
+However, we don't necessarily need/want that information in the same model (depending on our questions).
+
+For now lets explore length models without accounting for total catch
+
+# libraries
+```{r}
+library(tidyverse)
+library(sdmTMB)
+library(sf)
+library(concaveman)
+library(ggplotify)
+library(patchwork)
+library(akgfmaps) # required when installing ahead of coldpool
+library(coldpool) # this & above from afsc gap products
+library(ggeffects)
+
+#getNOAABathy lines
+library(marmap)
+#for plotting maps and projections
+library(maps)
+library(mapdata)
+library(mapproj)
+```
+
+data
+```{r}
+# updated to include 2026, see Juvenile_pollock_datapull.Rmd to see exploration and cleaning steps
+lngs <- read.csv("Data/a0pollock_corrected_lngs_102826.csv") %>%
+  filter(corrected_length < 120)
+
+# looking at the cutoffs it mainly reduces sample size in 2004 when I'm assuming appropriate cutoffs were not being used
+# table(lngs$corrected_length > 140, lngs$sample_year)
+# hist(lngs$corrected_length)
+```
+
+
+# spatial and bathy files
+```{r}
+sf_use_s2(TRUE)
+
+# need to use world not world2hires cause that one is hella old and doesn't plot correctly
+bs_map <- maps::map("world", regions = c("USA:Alaska", "Russia"), 
+                    fill = TRUE, plot = FALSE, wrap = c(0, 360)) %>%
+  st_as_sf(crs = 4326) 
+
+# Use bounding box, have to add 360 to the bbox coords
+# xmin = 185 (-175), xmax = 202 (-155)
+bbox_360 <- st_bbox(c(xmin = 180, xmax = 210, ymin = 50, ymax = 68), 
+                    crs = st_crs(bs_map))
+
+# crop 
+# Using st_make_valid helps w/ messy polys
+bs_base <- bs_map %>% 
+  st_make_valid() %>% 
+  st_intersection(st_as_sfc(bbox_360)) %>%
+  st_shift_longitude() 
+
+bs_utm <- bs_base %>%
+  st_transform(crs = 32602) # Move to UTM Zone 2N
+  
+
+#read in bathymetry file.  
+bathline <- getNOAA.bathy(-180,-155,54,68)
+
+bathline.xyz <- as.xyz(bathline)
+
+# plot
+# ggplot() +
+#   geom_sf(data = bs_base, fill = "antiquewhite", color = "black") +
+#   theme_minimal() +
+#   geom_contour(data = bathline.xyz, mapping = aes(x = V1 + 360, y = V2, z = V3),
+#                breaks = c(-20, -50, -100))
+```
+
+
+# 1. lng SDMtmb
+```{r}
+head(lngs)
+# check for NAs
+table(is.na(lngs$corrected_length)) # 17 true
+table(is.na(lngs$eq_latitude))
+table(is.na(lngs$eq_longitude))
+table(is.na(lngs$haul_date))
+
+
+lngs_utm <- lngs %>%
+  # for now we'll remove the na lengths but ideally we'll fix this on the db side so it won't be a prblem
+  filter(!(is.na(corrected_length))) %>%
+  mutate(date = as.Date(haul_date),
+         doy = yday(date),
+         median_doy = median(doy),
+         scale_doy = doy - median_doy,
+         mean_doy = mean(doy),
+         sd_doy = sd(doy),
+         scale_doy2 = (doy - mean_doy)/sd_doy,
+         scaled_median = (median_doy - mean_doy) / sd_doy) %>%
+  arrange(station_id) %>%
+  dplyr::select(c(sample_year, station_id, doy, scale_doy, scale_doy2, scaled_median, eq_latitude, eq_longitude, corrected_length)) %>%
+  add_utm_columns(., ll_names = c("eq_longitude", "eq_latitude"),
+                  ll_crs = 4326, utm_names = c("X", "Y"), 
+                  units = "km") # uses crs 32602
+  
+# create mesh
+mesh.lng <- make_mesh(lngs_utm, c("X", "Y"), n_knots = 75)
+plot(mesh.lng)
+```
+
+Plot sample sizes
+
+This is basically where we have length data for age-0 pollock
+```{r}
+lngs$station_name <- paste(plyr::round_any(lngs$eq_latitude,0.25),plyr::round_any(lngs$eq_longitude,0.25),sep="")
+
+bs_cropped_wgs <- st_transform(bs_base, crs = 4326) %>%
+  st_shift_longitude()
+
+
+lngs %>%
+  group_by(station_name) %>%
+  dplyr::mutate(sample.size = n(),
+                   ) %>%
+  distinct(sample_year, eq_latitude, eq_longitude, sample.size, station_name) %>%
+  #st_as_sf(coords = c("eq_longitude", "eq_latitude"), crs = 4326)
+  ggplot() +
+  # note about longitude need to add 360 to deal with the funkiness at 180 intl date line
+  # ** in wgs, if in other crs i dunno
+  geom_hex(aes(eq_longitude + 360, eq_latitude, fill = sample.size, group = sample.size)) +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_contour(data = bathline, aes(x = x + 360, y = y, z = z),
+               breaks = c(-20, -50, -100, -200), linewidth = 0.3, colour = "black") +
+  labs(fill = "Number of samples") +
+  viridis::scale_fill_viridis(option = "inferno") +
+  #coord_sf(crs="EPSG:3476",default_crs=sf::st_crs(4326),xlim=c(-175,-155),ylim=c(54,65)) +
+  theme_minimal()
+```
+
+
+# fit measured lengths
+
+We have a couple options to how we fit this:
+- we can use a gaussian 
+- we can use a lognormal
+- generalized gamma 
+```{r}
+fit.gaus <- sdmTMB(
+  data = lngs_utm,
+  # model formula
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  # add mesh
+  mesh = mesh.lng, 
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  time = "sample_year", 
+  # family important.... start with gaussian
+  family = gaussian(),
+  #family = lognormal(link = "log"), 
+  spatial = "on",
+  # each year independentally estimated
+  spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = TRUE
+)
+
+fit.logN <- sdmTMB(
+  data = lngs_utm,
+  # model formula
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  # add mesh
+  mesh = mesh.lng, 
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  time = "sample_year", 
+  # family important.... start with gaussian
+  family = lognormal(link = "log"),
+  spatial = "on",
+  # each year independentally estimated
+  spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = TRUE
+)
+
+fit.gamma <- sdmTMB(
+  data = lngs_utm,
+  # model formula
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  # add mesh
+  mesh = mesh.lng, 
+  # we want to fit a spatiotemporal model with iid so we need to say which is the time category
+  time = "sample_year", 
+  # family important.... start with gaussian
+  family = gengamma(link = "log"),
+  spatial = "on",
+  # each year independentally estimated
+  spatiotemporal = "IID",
+  # we want ansiotropy because we want to assume that the decomposition of Matern distance isn't
+  # necessarily the same EW as NS. Esp cause in the BS we have the shelf patterns that can drive 
+  # species distributions
+  anisotropy = TRUE
+)
+```
+
+
+Do they all converge appropriately?
+```{r}
+sanity(fit.gaus)
+sanity(fit.logN)
+sanity(fit.gamma)
+
+# all converge appropriately
+
+AIC(fit.gaus); AIC(fit.logN); AIC(fit.gamma)
+
+# generalized gamma has the lowest AIC
+
+# initial look at the random parameters, look similar (aside from the expected diff bc of log links)
+tidy(fit.gaus, "ran_pars") # is the wild sd scaled doy bc its gaussian?
+tidy(fit.logN, "ran_pars") 
+tidy(fit.gamma, "ran_pars")
+```
+
+## model evalutions
+```{r}
+# model list:
+# already removed nbs pcod because that model doesn't converge nice
+model.list <- list(fit.gaus, fit.logN, fit.gamma)
+names(model.list) <- c("fit.gaus", "fit.logN", "fit.gamma")
+```
+
+### gradient check
+```{r}
+check_gradient <- function(model) {
+  if(any(model$gradients > 0.0005)){
+    print(paste("model has too large of a gradient:", names(model)))
+  } else {
+    print("model passes gradient check")
+  }
+}
+
+for(i in 1:length(model.list)) {
+  print(names(model.list)[[i]])
+  check_gradient(model.list[[i]])
+}
+```
+
+### residual plots
+this takes longer to run since i'm simulating 500 times to then extract dharma residuals.
+```{r}
+# create empty plot list
+residual.plots <- list()
+spatial.plots <- list()
+residual.df <- list()
+
+# if underlying data changes (no longer lngs_utm) then this has to change
+
+for(name in names(model.list)) {
+
+  mod <- model.list[[name]]
+  df <- lngs_utm
+  
+  # get model names
+  mod_fam <- mod$family$family
+  fam_label <- paste(mod_fam, collapse = "_")
+  
+  # extract residuals
+  sims <- simulate(mod, nsim = 500, type = "mle-mvn")
+  resid <- dharma_residuals(sims, mod, return_DHARMa = TRUE)
+  
+  # create dharma plots as ggplots
+  p_qq <- as.grob(~DHARMa::plotQQunif(resid))
+  p_res <- as.grob(~DHARMa::plotResiduals(resid))
+  
+  # combine residual plots
+  dharma_plots <- wrap_plots(p_qq, p_res) +
+    plot_annotation(title = paste(name, fam_label, "DHARMa Diagnostics"))
+  
+  # put plot in a list to look at
+  residual.plots[[name]] <- dharma_plots
+  
+  # put the residuals in a df for spatial plotting
+  df$resid <- resid$scaledResiduals
+  residual.df[[name]] <- df
+  
+  # create spatial plot
+  spatials <- ggplot(df) +
+    geom_point(aes(X,Y, col = resid)) +
+    labs(title = paste(name, fam_label, "Spatial residuals")) +
+    scale_colour_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0.5) +
+    facet_wrap(~sample_year) +
+    coord_fixed() +
+    theme_minimal()
+  
+  # put into list to look at
+  spatial.plots[[name]] <- spatials
+  
+
+
+  print(name)
+  residual.df[[name]] <- df
+  
+}
+```
+
+
+review plots
+```{r}
+residual.plots[[1]]
+residual.plots[[2]]
+residual.plots[[3]]
+
+spatial.plots[[1]]
+spatial.plots[[2]]
+spatial.plots[[3]]
+
+# tbh these all look pretty similar to me. in terms of how the residuals are distributed spatially etc
+```
+
+
+##cross validation
+The fits of all the different distributions look fine. If you continue down the 
+script we compare the partial effects of length by year at an average spatial location and median doy 248
+
+However lets fint some cv models to see if we can definitely choose a model
+```{r eval=FALSE, include=FALSE}
+plan(multisession)
+
+gaus_cv <- sdmTMB_cv(
+  data = lngs_utm,
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = gaussian(),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE,
+  k_folds = 6
+)
+
+logN_cv <- sdmTMB_cv(
+  data = lngs_utm,
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE,
+  k_folds = 6
+)
+
+gamma_cv <- sdmTMB_cv(
+  data = lngs_utm,
+  corrected_length ~ 0 + s(scale_doy2) + as.factor(sample_year),
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = gengamma(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE, 
+  k_folds = 6
+)
+```
+
+Comparing outputs
+```{r eval=FALSE, include=FALSE}
+#1. compare the nge log likelihood - closer to 0 is better
+gaus_cv$sum_loglik
+logN_cv$sum_loglik 
+gamma_cv$sum_loglik
+
+#2. look at mean log likelihoods
+mean_loglike_gaus <- gaus_cv$sum_loglik / nrow(gaus_cv$data) 
+mean_loglike_logN <- logN_cv$sum_loglik / nrow(logN_cv$data)
+mean_loglike_gamma <- gamma_cv$sum_loglik / nrow(gamma_cv$data)
+
+#3. look at RMSE across entire dataset
+sqrt(mean((gaus_cv$data$corrected_length - gaus_cv$data$cv_predicted)^2)) 
+sqrt(mean((logN_cv$data$corrected_length - logN_cv$data$cv_predicted)^2)) 
+sqrt(mean((gamma_cv$data$corrected_length - gamma_cv$data$cv_predicted)^2)) 
+
+#4. RMSE by folds
+rmse_gaus <- dplyr::group_by(gaus_cv$data, cv_fold) |> 
+  dplyr::summarize(
+    mae = mean(abs(corrected_length - cv_predicted)),
+    rmse = sqrt(mean((corrected_length - cv_predicted)^2)))
+rmse_logN <- dplyr::group_by(logN_cv$data, cv_fold) |> 
+  dplyr::summarize(
+    mae = mean(abs(corrected_length - cv_predicted)),
+    rmse = sqrt(mean((corrected_length - cv_predicted)^2)))
+rmse_gamma <- dplyr::group_by(gamma_cv$data, cv_fold) |> 
+  dplyr::summarize(
+    mae = mean(abs(corrected_length - cv_predicted)),
+    rmse = sqrt(mean((corrected_length - cv_predicted)^2)))
+# hmm look the same
+ggplot() +
+  geom_line(aes(x = cv_fold, rmse), data = rmse_gaus, col = "red") +
+  geom_line(aes(x = cv_fold, rmse), data = rmse_logN, col = "blue") +
+  geom_line(aes(x = cv_fold, rmse), data = rmse_gamma, col = "green")
+
+#' honestly hard to come up with a determination based on this, but the cross validation didn't seem to work super well with 
+#' the gaussian distribution, the model doesn't convert with the different folds
+#' the gamma seems to consistently have higher rmse so I t hink we'll split the diff and use the logN
+```
+
+
+create prediction
+```{r}
+# create prediction grid
+## create sf object
+lng_sf <- lngs_utm %>%
+  ungroup() %>%
+  dplyr::select(c(X, Y, eq_latitude, eq_longitude)) %>%
+  mutate(X = X*1000, Y = Y*1000) %>% # convert to meters for crs 32602
+  st_as_sf(coords = c("X", "Y"), crs = 32602)
+
+## create convex hull
+convex <- concaveman(lng_sf, concavity = 3)
+
+## add buffer to edges
+convex_buff <- st_buffer(convex, dist = 15e3) # dist in meters (we think)
+plot(convex_buff) # looks about right
+
+## make grid
+# make grid, created a cell size of 10,000 x 10,000 m (10 x 10 km) with poitns in center
+# need to check units on this... 
+grid <- st_make_grid(convex_buff, cellsize = 10e3, what = "centers") %>%
+  st_intersection(convex_buff)
+
+## change back to df
+bs.grid <- do.call(rbind, st_geometry(grid)) %>%
+  as_tibble() %>% setNames(c("X", "Y")) %>%
+  # convert df m back to km
+  mutate(X = X/1e3, Y = Y/1e3)
+plot(bs.grid)
+
+## replicate df across years and include any other variables we inlcude in our fit of the model
+## i.e., depth tmeperature etc
+scaled_median <- unique(lngs_utm$scaled_median)
+
+bs.grid.year <- replicate_df(bs.grid, "sample_year", unique(lngs_utm$sample_year))
+bs.grid.year.doy <- replicate_df(bs.grid.year, "scale_doy2", scaled_median) # this is at doy 248
+```
+
+predict back to observations
+
+## index comparison
+
+```{r}
+# predict 
+pred.gaus <- predict(fit.gaus, newdata = bs.grid.year.doy, return_tmb_object = T, type = "response")
+pred.logN <- predict(fit.logN, newdata = bs.grid.year.doy, return_tmb_object = T, type = "response")
+pred.gamma <- predict(fit.gamma, newdata = bs.grid.year.doy, return_tmb_object = T, type = "response")
+
+# index
+index.gaus <- get_index(pred.gaus, bias_correct = T)
+index.logN <- get_index(pred.logN, bias_correct = T)
+index.gamma <- get_index(pred.gamma, bias_correct = T)
+
+# plot index and see how much they vary between distributions
+ggplot() +
+  geom_pointrange(data = index.gaus, aes(x = sample_year, y = est, ymin = lwr, ymax = upr), color = "blue") +
+  geom_pointrange(data = index.logN, aes(x = sample_year+0.1, y = est, ymin = lwr, ymax = upr), color = "green") +
+  geom_pointrange(data = index.gamma, aes(x = sample_year+0.5, y = est, ymin = lwr, ymax = upr), color = "orange")
+# the pattern is identical, the ci appears to be close (although some variation)
+# the point estimates for gaussian are the lowest with logN slightly higher and gamma above that. 
+
+library(ggeffects)
+# marginal effect of sample_year holding DOY at median
+eff.gaus <- ggpredict(fit.gaus, terms = "sample_year [all]")
+eff.logN <- ggpredict(fit.logN, terms = "sample_year [all]")
+eff.gamma <- ggpredict(fit.gamma, terms = "sample_year [all]")
+
+eff.logN <- as.data.frame(eff.logN) %>%
+  mutate(dist = "logN")
+eff.gamma <- as.data.frame(eff.gamma) %>%
+  mutate(dist = "gamma")
+
+all.dat <- as.data.frame(eff.gaus) %>%
+  mutate(dist = "gaussian") %>%
+  rbind(eff.logN) %>%
+  rbind(eff.gamma)
+
+ggplot(all.dat) +
+  geom_pointrange(aes(x= x, y = predicted, ymin = conf.low, ymax = conf.high, color = dist), position = position_jitter()) +
+  labs(x = "Years", y = "Predicted length (mm)")
+
+ggplot(eff.logN) +
+  geom_pointrange(aes(x= x, y = predicted, ymin = conf.low, ymax = conf.high)) +
+  labs(x = "Years", y = "Predicted length (mm)") +
+  theme_minimal()
+
+```
+
+# Predicted mapping
+
+## deviations from average
+```{r}
+# have to predict the correct model again but not keep the tmb object
+pred <- predict(fit.logN, newdata = bs.grid.year.doy)
+
+# create a sf of the predictions
+pred.lng.sf <- pred %>%
+  mutate(Y = Y*1000,
+         X = X*1000) %>% # sf requires meters
+  st_as_sf(coords = c("X", "Y"), crs = 32602) %>%
+  st_transform(., crs = 4326) %>%
+  st_shift_longitude()
+  
+# what might be helpful here too is the average spatial field 
+#' by keeping the exp(omega) were showing the relative length anomaly across space. 
+#' here (I think) it means that 1 is the average or baseline value (aka average length of a fish after accounting for doy & ran eff maybe)
+#' the larger and smaller deviations are above and below 1. So 1.075 representes a fish that is 7.5% larger than the average
+#' math: percent increase = exp(value) -1 * 100
+ggplot() +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = exp(omega_s), color = exp(omega_s)),
+          data = pred.lng.sf, pch = 22) +
+  geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+               breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude")
+
+#' if we wanted to know what the absolute length deviations from a fish you'd need to incorporate the average length of a fish
+mean(exp(pred$est)) # I dunno if this is legit but for now lets call an average fish is 57 mm long
+pred.lng.sf$absolute_omega_s <- (exp(pred.lng.sf$omega_s) - 1) * (mean(exp(pred$est)))
+
+ggplot() +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = absolute_omega_s, color = absolute_omega_s),
+          data = pred.lng.sf, pch = 22) +
+  geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+               breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude", color = expression("Deviation from \naverage length (mm)"),
+       fill = expression("Deviation from \naverage length (mm)"))
+```
+
+## sptm maps
+```{r}
+ggplot() +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = exp(est), color = exp(est)),
+          data = pred.lng.sf, pch = 22) +
+  geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+               breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude", color = "Length (mm)", fill = "Length (mm)") +
+  facet_wrap(~sample_year)
+
+# just the recent sebs years
+ggplot() +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = exp(est), color = exp(est)), pch = 22,
+          data = filter(pred.lng.sf, sample_year %in% c(2018, 2022, 2024, 2026))) +
+  geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+               breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude", color = "Length (mm)", fill = "Length (mm)") +
+  facet_wrap(~sample_year, ncol = 2)
+
+```
+
+# Env models
+Okay and close to the those particular length sdmTMB models. 
+What does it look like to add in additional parameters to the model formula? 
+
+Starting with the simple ones, temperature/coldpoolindex
+```{r}
+head(lngs_utm)
+head(cold_pool_index)
+cpi <- rename_with(cold_pool_index, tolower)
+
+lngs_env <- lngs_utm %>%
+  left_join(cpi, by = c("sample_year" = "year")) %>%
+  mutate(sc_surf_tmp = scale(mean_surface_temperature),
+         sample_year = as.numeric(sample_year)) 
+```
+
+
+```{r}
+#' what do we think we're fitting here? 
+#' looking at the spatial/spatiotemporal patterns in length of pollock when accounting for yearly
+#' variability in surface temperature and doy
+fit.stmp <- sdmTMB(
+  data = lngs_env,
+  corrected_length ~ scale_doy2 + s(mean_surface_temperature, k = 4),
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "off",
+  spatiotemporal = "IID",
+  anisotropy = TRUE
+)
+
+sanity(fit.stmp)
+tidy(fit.stmp, "ran_pars")
+tidy(fit.stmp)
+check_gradient(fit.stmp)
+```
+
+### model eval
+```{r}
+mod <- fit.stmp 
+df <- lngs_env
+  # extract residuals
+  sims <- simulate(mod, nsim = 500, type = "mle-mvn")
+  resid <- dharma_residuals(sims, mod, return_DHARMa = TRUE)
+  
+  # create dharma plots as ggplots
+  p_qq <- as.grob(~DHARMa::plotQQunif(resid))
+  p_res <- as.grob(~DHARMa::plotResiduals(resid))
+  
+  # combine residual plots
+  dharma_plots <- wrap_plots(p_qq, p_res) +
+    plot_annotation(title = paste(name, fam_label, "DHARMa Diagnostics"))
+  
+  # view
+  dharma_plots
+  
+  # put the residuals in a df for spatial plotting
+  df$resid <- resid$scaledResiduals
+  
+  # create spatial plot
+  spatials <- ggplot(df) +
+    geom_point(aes(X,Y, col = resid)) +
+    labs(title =  "Spatial residuals") +
+    scale_colour_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0.5) +
+    facet_wrap(~sample_year) +
+    coord_fixed() +
+    theme_minimal()
+
+  # view 
+  spatials
+```
+
+
+## predict
+```{r}
+eff.tmp <- ggpredict(fit.stmp, "mean_surface_temperature [all]",
+                     condition = c(scale_doy2 = scaled_median,
+                                   sample_year = 2018))
+
+eff.tmp2 <- ggpredict(fit.stmp, "mean_surface_temperature [all]",
+                     condition = c(scale_doy2 = scaled_median,
+                                   sample_year = 2003))
+
+eff.tmp3 <- ggpredict(fit.stmp, "mean_surface_temperature [all]",
+                     condition = c(scale_doy2 = scaled_median,
+                                   sample_year = 2026))
+
+
+plot(eff.tmp, show_data = TRUE)
+
+
+```
+
