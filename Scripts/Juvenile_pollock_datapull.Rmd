@@ -23,14 +23,25 @@ gad_tax <- get_ema_taxonomy() %>%
   filter(str_detect(scientific_name, "Gadus"))
 head(gad_tax) # tsn code for pollock 934083
 
-gadus.can.catch <- join_event_catch(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
-                 gear = "CAN", trawl_method = "S", catch0 = TRUE, tsn = 934083)
+this.year <- year(Sys.Date())
 
-gadus.nets.catch <- join_event_catch(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
-                 gear = "NETS156", trawl_method = "O", catch0 = TRUE, tsn = 934083)
+gadus.can.catch <- join_event_catch(start_year = 2003, end_year = this.year, survey_region = c("NBS", "SEBS"),
+                 gear = "CAN", trawl_method = "S", catch0 = TRUE, tsn = 934083) %>%
+  # for now lets remove any instances of station 20260305040 that has Q we should be able to remove this filter
+  # when we push the data fix.
+  filter(!(station_id == 20260305040 & gear_performance == "Q"))
 
-gadus.lengths <- join_event_fish(start_year = 2003, end_year = 2025, survey_region = c("NBS", "SEBS"),
-                                 gear = c("CAN", "NETS156"), trawl_method = c("S", "O"), tsn = 934083)
+gadus.nets.catch <- join_event_catch(start_year = 2003, end_year = this.year, survey_region = c("NBS", "SEBS"),
+                 gear = "NETS156", trawl_method = "O", catch0 = TRUE, tsn = 934083) %>%
+  # for now lets remove any instances of station 20260305040 that has Q we should be able to remove this filter
+  # when we push the data fix.
+  filter(!(station_id == 20260305040 & gear_performance == "Q"))
+
+gadus.lengths <- join_event_fish(start_year = 2003, end_year = this.year, survey_region = c("NBS", "SEBS"),
+                                 gear = c("CAN", "NETS156"), trawl_method = c("S", "O"), tsn = 934083) %>%
+  # for now lets remove any instances of station 20260305040 that has Q we should be able to remove this filter
+  # when we push the data fix.
+  filter(!(station_id == 20260305040 & gear_performance == "Q"))
 ```
 
 Tasks for this script/exploration
@@ -40,7 +51,7 @@ Tasks for this script/exploration
 - check length histograms for misassigned lhs designations for smaller/larger lengths
 - look at length histograms for years with both CAN/NETS156 and see if they're comparable 
 
-For 2024:
+For 2024 & 2026:
 - look at length histograms from 2024 for evidence of bi/tri-modal distributions
 - create a station map of length distributions (2-paneled plot with map and then length distributions by station?)
 - Regress size on latitude
@@ -49,17 +60,29 @@ Next steps?:
 - maybe see if you can use sdmTMB to get size corrected lengths
 ? do you use all years data? 
 ? do you catch weight data first?
+  After reflection I don't think you should catch-weight first. It somewhat depends on the question, but if 
+  you want to talk about how lengths change across the EBS you don't necessarily need to also incorporate abundance 
+  information at the same time. You can choose to think that the individuals sampled represent a random sample of the 
+  population and go off that. Sure you might sample a less/greater proportion of the population, but that doesn't matter quite 
+  as much. 
 
 # check lng data
 ```{r}
-unique(gadus.lengths[c("sample_year", "gear", "tow_type")]) # okay good
+unique(gadus.lengths[c("sample_year","region", "gear", "tow_type")]) %>% # okay good
+  arrange(sample_year)
 
+table(gadus.lengths$gear_performance == "Q") # 77 tows
 unique(gadus.lengths$gear_performance)
 # two questionable tows, one in 2022 for CAN because the net was too deep initially for 10-12 min footrope was around 25 m (at least), large swells, sped up to get shallower
 # the other question tow was for NETS156 O in 2016 on Dyson because the doors in was used not HB?
 filter(gadus.lengths, gear_performance == "Q") %>%
-  distinct(sample_year, cruise_id, gear, gear_performance, tow_type, region, event_notes)
+  distinct(sample_year, station_id, cruise_id, gear, gear_performance, tow_type, region, event_notes)
 # Okay so 2022 is def questionable and we have to think if this is something we want to include, however, the 2016 NETS seems like this is something that would impact the effort calculation - does it matter? And did it get address in the db?
+filter(gadus.can.catch, gear_performance == "Q") %>%
+  distinct(sample_year, station_id, cruise_id, gear, gear_performance, tow_type, region, event_notes, catch_notes, effort)
+filter(gadus.nets.catch, gear_performance == "Q") %>%
+  distinct(sample_year, station_id, cruise_id, gear, gear_performance, tow_type, region, event_notes, catch_notes, effort)
+
 
 # what are the length types used:
 unique(gadus.lengths$length_type)
@@ -125,14 +148,14 @@ Notes about U lhs_code assignment: gave those values to Andrew and he dug into t
 He will changes these data and update akfin when complete. This will also change the catch numbers
 
 Quick exploration to how many different species have multiple size classes in our database
-```{r}
-catch <- join_event_catch(start_year = 2003, end_year = 2025, gear = c("CAN", "Nor264", "NETS156", "MAR"),
+```{r eval=FALSE, include=FALSE}
+catch <- join_event_catch(start_year = 2003, end_year = this.year, gear = c("CAN", "Nor264", "NETS156", "MAR"),
                           trawl_method = c("S", "D", "FP", "L", "M", "O", "S", "V"))
 
 cap_tax <- get_ema_taxonomy() %>%
   filter(str_detect(scientific_name, "Mallotus"))
 
-capelin_lengths <- join_event_fish(start_year = 2003, end_year = 2025, gear = c("CAN", "Nor264", "NETS156", "MAR"),
+capelin_lengths <- join_event_fish(start_year = 2003, end_year = this.year, gear = c("CAN", "Nor264", "NETS156", "MAR"),
                           trawl_method = c("S", "D", "FP", "L", "M", "O", "S", "V"),
                           tsn = 162035)
 
@@ -156,7 +179,8 @@ unique(species.w.multiple.lhs$species_tsn) %>% length()
 # how'd we end up with multiple lhs for capelin including age0 age 1 and U?
 capelin_lengths %>%
   ggplot() +
-  geom_density(aes(x = length, fill =  lhs_code), alpha = 0.7)
+  geom_density(aes(x = length, fill =  lhs_code), alpha = 0.7) +
+  facet_wrap(~region)
 
 table(capelin_lengths$lhs_code, capelin_lengths$sample_year)
   
@@ -239,22 +263,24 @@ sebs.gadus %>%
 # look at the scatter plot of lengths against latitude
 
 # sample size
-sample.size24 <- sebs.gadus %>%
+sample.size <- sebs.gadus %>%
   filter(lhs_code == "A0",
-         sample_year == 2024) %>%
-  group_by(eq_latitude, sample_year, event_code, gear,
+         sample_year %in% c(2018, 2022, 2024, 2026)) %>%
+  group_by(master_station_name, eq_latitude, sample_year, event_code, gear,
            station_id, species_tsn, common_name, scientific_name, lhs_code,
            length_type) %>%
-  dplyr::summarise(num = n())
+  dplyr::summarise(num = n()) %>%
+  ungroup()
 
 ## length pltos
 
 sebs.gadus %>%
   filter(lhs_code == "A0",
-         sample_year == 2024) %>%
+         sample_year %in% c(2018, 2022, 2024, 2026)) %>%
   ggplot() +
-  ggridges::geom_density_ridges(aes(x = length, y = as.factor(eq_latitude))) +
-  geom_text(data = sample.size24, aes(x = 100, y = as.factor(eq_latitude), label = num))
+  ggridges::geom_density_ridges(aes(x = length, y = master_station_name,
+                                    fill = as.factor(sample_year))) #+
+  geom_text(data = sample.size, aes(x = 100, y = as.factor(master_station_name), label = num))
 
 sebs.gadus %>%
   filter(lhs_code == "A0",
@@ -266,10 +292,21 @@ sebs.gadus %>%
 
 sebs.gadus %>%
   filter(lhs_code == "A0",
-         sample_year == 2024) %>%
+         sample_year %in% c(2024, 2026)) %>%
   ggplot() +
-  geom_boxplot(aes(y = length, x = as.factor(eq_latitude), group = as.factor(eq_latitude))) +
+  geom_boxplot(aes(y = length, x = as.factor(eq_latitude), group = as.factor(eq_latitude), 
+                   fill = as.factor(sample_year))) +
   coord_flip()
+
+# if you use master station name as a proxy for lat (its rounded)
+sebs.gadus %>%
+  filter(lhs_code == "A0",
+         sample_year %in% c(2018, 2022, 2024, 2026)) %>%
+  ggplot() +
+  geom_boxplot(aes(y = length, x = as.factor(master_station_name), 
+                   fill = as.factor(sample_year))) +
+  coord_flip()
+
 
 
 # look at longitude
@@ -304,6 +341,16 @@ gadus.lengths %>%
   ggplot() +
   geom_point(aes(x = length, y = reorder(as.factor(station_id), eq_latitude), color = region)) +
   geom_text(aes(x = 110, y = as.factor(station_id), label = num, group = region), data = sample.no)
+
+
+gadus.lengths %>%
+  filter(lhs_code == "A0",
+         sample_year %in% c("2024","2026"),
+         gear %in% c("CAN", "NETS156")) %>%
+  group_by(eq_latitude, sample_year) %>%
+  dplyr::summarize(mean_lng = mean(length)) %>%
+  ggplot() +
+  geom_point(aes(x = mean_lng, y = eq_latitude, color = as.factor(sample_year)))
 
 gadus.lengths %>%
   filter(lhs_code == "A0",
@@ -442,7 +489,7 @@ For now lets just ignore that there are catch events that we have no length info
 into the next script where we'll catch-weight
 
 ```{r}
-length(unique(corrected.poll.a0$station_id)) # 1139
+length(unique(corrected.poll.a0$station_id)) # 1203
 length(unique(a0.can.catch$station_id)) # 1953
 nrow(a0.can.catch) # 1953
 
@@ -451,6 +498,6 @@ catch.w.lng <- subset(a0.can.catch, station_id %in% unique(corrected.poll.a0$sta
 nrow(catch.w.lng) # 1139 which matches the length of unique stations 
 
 # write.csv(catch.w.lng, "Data/a0pollock_catch_w_length_samples_041326.csv", row.names = F)
-# write.csv(corrected.poll.a0, "Data/a0pollock_corrected_lngs_041326.csv", row.names = F)
+#write.csv(corrected.poll.a0, "Data/a0pollock_corrected_lngs_102826.csv", row.names = F)
 ```
 
