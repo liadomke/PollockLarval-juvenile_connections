@@ -595,16 +595,19 @@ Plot sample sizes
 ```{r}
 lngs$station_name <- paste(plyr::round_any(lngs$eq_latitude,0.25),plyr::round_any(lngs$eq_longitude,0.25),sep="")
 
+bs_cropped_wgs <- st_transform(bs_cropped, crs = 4326) %>%
+  st_shift_longitude()
 
 lngs %>%
   group_by(station_name) %>%
   dplyr::mutate(sample.size = n(),
                    ) %>%
+  #st_as_sf(coords = c("eq_longitude", "eq_latitude"), crs = 4326)
   ggplot() +
   # note about longitude need to add 360 to deal with the funkiness at 180 intl date line
   # ** in wgs, if in other crs i dunno
   geom_hex(aes(eq_longitude + 360, eq_latitude, fill = sample.size, group = log(sample.size))) +
-  geom_sf(data = bs_cropped, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
   geom_contour(data = bathline, aes(x = x + 360, y = y, z = z),
                breaks = c(-20, -50, -200), linewidth = 0.3, colour = "black") +
   labs(fill = "Number of samples") +
@@ -720,15 +723,16 @@ pred.lng <- predict(fit.lng, newdata = bs.grid.year.doy)
 
 # unsure why this has to happen by the Y (latitude) is off by 1000s
 pred.lng.sf <- pred.lng %>%
-  mutate(Y = Y,
-         X = X) %>%
+  mutate(Y = Y*1000,
+         X = X*1000) %>%
   st_as_sf(coords = c("X", "Y"), crs = 32602) %>%
-  st_transform(., crs = 4326) 
+  st_transform(., crs = 4326) %>%
+  st_shift_longitude()
 
-pred.lng.wgs <- pred.lng.sf %>%
-  st_shift_longitude() %>%
-  dplyr::mutate(lat = sf::st_coordinates(.)[,2],
-                lon = sf::st_coordinates(.)[,1])
+# pred.lng.wgs <- pred.lng.sf %>%
+#   st_shift_longitude() %>%
+#   dplyr::mutate(lat = sf::st_coordinates(.)[,2],
+#                 lon = sf::st_coordinates(.)[,1])
   
 
 # using the output from predict
@@ -740,14 +744,42 @@ ggplot(pred.lng, aes(X, Y, fill = est)) +
 
 # what might be helpful here too is the average spatial field 
 ggplot() +
-  geom_sf(data = bs_cropped, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
   # geom_contour(data = bathline, aes(x = x, y = y, z = z),
   #              breaks = c(-20, -50, -200), linewidth = 0.3, colour = "black") +
   geom_sf(mapping = aes(fill = omega_s, color = omega_s),
-          data = pred.lng.wgs, pch = 22) +
+          data = pred.lng.sf, pch = 22) +
   # geom_sf(mapping = aes(fill = omega_s), data = pred.lng.sf) +
   scale_fill_viridis_c() +
   scale_color_viridis_c()
+```
+
+
+## index of lengths by year
+```{r}
+# this is ccopied from 
+predictions_tmb <- predict(fit, newdata = bs.grid.doy, return_tmb_object = T)
+
+vr <- visreg(fit, xvar = "sample_year", 
+             cond=list(scale_doy = 0), # at 0 which  means at 243
+             plot = FALSE, 
+             scale = "response")
+
+
+# plot the predicted length (with missing years on x)
+
+pred.length <- vr$fit %>%
+  mutate(sample_year = as.character(sample_year),
+         sample_year = as.numeric(sample_year)) %>%
+  complete(sample_year = 2003:2025) %>%
+  ggplot() +
+  geom_point(aes(x = sample_year, y = visregFit)) +
+  geom_errorbar(aes(x = sample_year, y = visregFit,
+                      ymin = visregLwr, ymax = visregUpr), width = 0.2) +
+  theme_bw() +
+  theme(text = element_text(size = 18)) +
+  labs(x = "Year", y = "Predicted length (mm, August 31)")
+
 ```
 
 
