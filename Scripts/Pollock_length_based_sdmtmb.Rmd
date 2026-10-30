@@ -614,10 +614,24 @@ fit.stmp <- sdmTMB(
   anisotropy = TRUE
 )
 
-sanity(fit.stmp)
-tidy(fit.stmp, "ran_pars")
-tidy(fit.stmp)
-check_gradient(fit.stmp)
+fit.stmp2 <- sdmTMB(
+  data = lngs_env,
+  corrected_length ~ scale_doy2 + mean_surface_temperature,
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "off",
+  spatiotemporal = "IID",
+  anisotropy = TRUE
+)
+
+sanity(fit.stmp); sanity(fit.stmp2)
+tidy(fit.stmp, "ran_pars"); tidy(fit.stmp2, "ran_pars")
+tidy(fit.stmp); tidy(fit.stmp2)
+check_gradient(fit.stmp); check_gradient(fit.stmp2)
+
+AIC(fit.stmp2) - AIC(fit.stmp)
+# this indicates that a spline temperature inclusion is probably better
 ```
 
 ### model eval
@@ -655,6 +669,71 @@ df <- lngs_env
   spatials
 ```
 
+### cv
+```{r}
+plan(multisession)
+
+stmp_cv <- sdmTMB_cv(
+  data = lngs_env,
+  corrected_length ~ scale_doy2 + s(mean_surface_temperature, k = 4),
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "off",
+  spatiotemporal = "IID",
+  anisotropy = TRUE,
+  k_folds = 8
+)
+
+stmp_cv2 <- sdmTMB_cv(
+  data = lngs_env,
+  corrected_length ~ scale_doy2 + mean_surface_temperature,
+  mesh = mesh.lng, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "off",
+  spatiotemporal = "IID",
+  anisotropy = TRUE,
+  k_folds = 8
+)
+
+stmp_cv
+stmp_cv2
+```
+
+```{r}
+#1. compare the nge log likelihood - closer to 0 is better
+stmp_cv$sum_loglik
+stmp_cv2$sum_loglik 
+
+#2. look at mean log likelihoods
+mean_loglike_stmp <- stmp_cv$sum_loglik / nrow(stmp_cv$data) 
+mean_loglike_stmp2 <- stmp_cv2$sum_loglik / nrow(stmp_cv2$data)
+
+#3. look at RMSE across entire dataset
+sqrt(mean((stmp_cv$data$corrected_length - stmp_cv$data$cv_predicted)^2)) 
+sqrt(mean((stmp_cv2$data$corrected_length - stmp_cv2$data$cv_predicted)^2)) 
+
+#4. RMSE by folds
+rmse_stmp <- dplyr::group_by(stmp_cv$data, cv_fold) |> 
+  dplyr::summarize(
+    mae = mean(abs(corrected_length - cv_predicted)),
+    rmse = sqrt(mean((corrected_length - cv_predicted)^2)))
+rmse_stmp2 <- dplyr::group_by(stmp_cv2$data, cv_fold) |> 
+  dplyr::summarize(
+    mae = mean(abs(corrected_length - cv_predicted)),
+    rmse = sqrt(mean((corrected_length - cv_predicted)^2)))
+
+# hmm look the same
+ggplot() +
+  geom_line(aes(x = cv_fold, rmse), data = rmse_stmp, col = "red") +
+  geom_line(aes(x = cv_fold, rmse), data = rmse_stmp2, col = "blue")
+
+
+#' these models are pretty similar, but in general it looks like the smoothed version
+#' for temperature model fits the model a bit better and keeps root mean squared error lower. 
+```
+
 
 ## predict
 ```{r}
@@ -671,8 +750,30 @@ eff.tmp3 <- ggpredict(fit.stmp, "mean_surface_temperature [all]",
                                    sample_year = 2026))
 
 
-plot(eff.tmp, show_data = TRUE)
+tmp.df <- as.data.frame(eff.tmp) %>%
+  mutate(cond = 2018)
+tmp.df2 <- as.data.frame(eff.tmp2) %>%
+  mutate(cond = 2003)
+tmp.df3 <- as.data.frame(eff.tmp3) %>%
+  mutate(cond = 2026)
 
+tmp.all <- tmp.df %>%
+  rbind(tmp.df2) %>%
+  rbind(tmp.df3)
 
+ggplot(tmp.all) +
+  geom_pointrange(aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high),
+                  position = position_jitter(0.2)) +
+  facet_wrap(~cond)
+
+# okay my conclusion from this is that it doesn't really matter which year you condition the marginal effects prediction on. 
+
+tmp.df %>%
+  ggplot() +
+  geom_pointrange(aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high)) +
+  labs(x = "Bottom-trawl mean surface temperature (C)", y = "Predicted length (mm)") + 
+  theme_minimal()
+
+plot(eff.tmp, show_data = T)
 ```
 
