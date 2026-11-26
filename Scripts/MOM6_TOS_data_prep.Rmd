@@ -1,0 +1,167 @@
+---
+title: "MOM6_TOS_data_prep"
+output: html_document
+date: "2026-11-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Script to match the stations across years where we have pollock length data with the closest location with MOM6 surface temp
+
+We pulled the data in the BSpcod-lengths project, but no reason to do it twice so here we'll pull the data from that project (as long as its located on the same local desktop) and then save the newly matched tmp data with the length data on this project
+
+
+#libraries
+```{r}
+rm(list=ls(all=TRUE))
+
+library(dplyr)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tmap)
+library(tidyterra)
+library(gstat)
+```
+
+# data
+
+```{r}
+# we can include both surface and bottom temps, but most likely we only need surface temp
+tob <- readRDS("C:/Users/lia.domke/Desktop/Work/AFSC/R projects/BSpcod-lengths/tob_MOM6_1993_2025_AK.rds")
+tos <- readRDS("C:/Users/lia.domke/Desktop/Work/AFSC/R projects/BSpcod-lengths/tos_MOM6_1993_2025_AK.rds") %>%
+  rename(surface_temp = bottom_temp)
+```
+
+# standardize data
+```{r}
+# standardize first
+tob$lon <- ifelse(tob$lon > 180, tob$lon -360, tob$lon)
+tos$lon <- ifelse(tos$lon > 180, tos$lon - 360, tos$lon)
+
+
+tob_summer <- tob %>%
+    filter(month == "06"| month == "07"| month == "08" )%>%
+    filter(lon >= -180 & lon <= -130,
+           lat >= 50 & lat <= 70,
+           year > 2002) %>%
+  # average the summer tob to a single number for location
+  group_by(year, lon, lat) %>%
+  dplyr::summarise(mean_bottom_temp = mean(bottom_temp, na.rm = T),
+                   sd_bottom_temp = sd(bottom_temp, na.rm = T), .groups = "drop") %>%
+  mutate(year = as.integer(year))
+
+tos_summer <- tos %>%
+    filter(month == "06"| month == "07"| month == "08" )%>%
+    filter(lon >= -180 & lon <= -130,
+           lat >= 50 & lat <= 70,
+           year > 2002) %>%
+    group_by(year, lon, lat) %>%
+  dplyr::summarise(mean_surf_temp = mean(surface_temp, na.rm = T),
+                   sd_surf_temp = sd(surface_temp, na.rm = T), .groups = "drop") %>%
+  mutate(year = as.integer(year))
+
+  
+
+rm(tob); rm(tos)
+
+
+# quickly look at bottom temp
+tob_summer_sf <- tob_summer %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(crs = 32603)
+tos_summer_sf <- st_as_sf(tob_summer, coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(crs = 32603)
+
+# extract coords
+coords_utm_tob <- st_coordinates(tob_summer_sf) 
+coords_utm_tos <- st_coordinates(tos_summer_sf) 
+
+# convert to m
+tob_summer <- cbind(tob_summer, coords_utm_tob) %>%
+  mutate(X_km = X / 1000,
+         Y_km = Y/ 1000)
+
+tos_summer <- cbind(tos_summer, coords_utm_tos) %>%
+  mutate(X_km = X / 1000,
+         Y_km = Y/ 1000)
+```
+
+
+# matching
+```{r}
+# make sure its pollock and it matches the length restrictions we included in the sdmtmb files too (120mm)
+# this is going to match the length data with the mom6 data up through 2025. 2026 is not available yet. 
+lngs.df <- read.csv("Data/a0pollock_corrected_lngs_102826.csv") %>%
+  filter(corrected_length < 120) %>%
+  dplyr::select(c(sample_year, haul_date, eq_latitude, eq_longitude, region, corrected_length)) %>%
+  filter(!is.na(eq_longitude), !is.na(eq_latitude))
+
+lngs.sf <- st_as_sf(lngs.df, coords = c("eq_longitude", "eq_latitude"), crs = 4326) %>%
+  st_transform(crs = 32603)
+
+coords_utm_lngs <- st_coordinates(lngs.sf)
+
+lngs.df <- lngs.df %>%
+  mutate(
+    sample_year = as.integer(sample_year),
+    X_km = coords_utm_lngs[, "X"] / 1000,
+    Y_km = coords_utm_lngs[, "Y"] / 1000
+  )
+
+# create empty list
+matched_list <- list()
+temp_years <- sort(union(unique(tob_summer$year), unique(tos_summer$year)))
+years <- sort(intersect(unique(lngs.df$sample_year), temp_years))
+
+library(FNN)
+for(yr in years) {
+  tow_yr <- lngs.df[lngs.df$sample_year == yr, ]
+  tob_yr <- tob_summer[tob_summer$year == yr, ]
+  tos_yr <- tos_summer[tos_summer$year == yr, ]
+  
+  # set up the NAs
+  tow_yr$mean_bottom_temp <- NA_real_
+  tow_yr$dist_to_tob_km <- NA_real_
+  tow_yr$mean_surface_temp <- NA_real_
+  tow_yr$dist_to_tos_km <- NA_real_
+  
+  if(nrow(tow_yr) > 0) {
+      if(nrow(tob_yr) > 0) {
+       # nearest neighbor
+        nn <- FNN::get.knnx(data = as.matrix(tob_yr[, c("X_km", "Y_km")]),
+                            query = as.matrix(tow_yr[, c("X_km", "Y_km")]),
+                            k = 1)
+        
+        tow_yr$mean_bottom_temp <- tob_yr$mean_bottom_temp[nn$nn.index]
+        tow_yr$dist_to_tob_km <- nn$nn.dist[, 1] # check dist
+      }
+        # repeat for surface 
+      if(nrow(tow_yr) > 0 && nrow(tos_yr) > 0 ) {
+        # nearest neighbor for surface temp
+        nn2 <- FNN::get.knnx(data = as.matrix(tos_yr[, c("X_km", "Y_km")]),
+                             query = as.matrix(tow_yr[, c("X_km", "Y_km")]),
+                             k = 1)
+        
+        tow_yr$mean_surface_temp <- tos_yr$mean_surf_temp[nn$nn.index]
+        tow_yr$dist_to_tos_km <- nn2$nn.dist[, 1] # check surf dist
+        
+      }
+    # save data
+    matched_list[[as.character(yr)]] <- tow_yr
+    }
+  }
+
+lngs_env_matched <- bind_rows(matched_list)
+range(lngs_env_matched$dist_to_tob_km)
+range(lngs_env_matched$dist_to_tos_km)
+
+# okay this doesn't match in terms of the length because we don't have any MOMs6 data from 2026 yet. 
+# so all 2026 data are missing
+nrow(lngs_env_matched); nrow(lngs.df)
+test <- anti_join(lngs.df, lngs_env_matched)
+unique(test$sample_year) # all 2026 which makes sense
+#write.csv(lngs_env_matched, "Data/pollock_corrected_lngs_wMOM6.csv")
+```

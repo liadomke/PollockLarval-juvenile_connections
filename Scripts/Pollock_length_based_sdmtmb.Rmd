@@ -592,10 +592,31 @@ head(lngs_utm)
 head(cold_pool_index)
 cpi <- rename_with(cold_pool_index, tolower)
 
+# these are the matched mom6 but it doesn't have the 2026 data
+lng_moms <- read.csv("Data/pollock_corrected_lngs_wMOM6.csv") %>%
+  dplyr::select(c(sample_year, haul_date, eq_latitude, eq_longitude, region,
+                  corrected_length, mean_bottom_temp, mean_surface_temp)) %>%
+  mutate(sample_year = as.numeric(sample_year)) %>%
+  dplyr::rename(mean_mom6_surface_temp = mean_surface_temp,
+                mean_mom6_bottom_temp = mean_bottom_temp) %>%
+  # add a unique ID year for ease of joining
+  arrange(sample_year, eq_latitude, eq_longitude, corrected_length) %>%
+  mutate(unique_id = 1:nrow(.))
+
 lngs_env <- lngs_utm %>%
   left_join(cpi, by = c("sample_year" = "year")) %>%
   mutate(sc_surf_tmp = scale(mean_surface_temperature),
-         sample_year = as.numeric(sample_year)) 
+         sample_year = as.numeric(sample_year))
+  
+poll_temp <- lngs_env %>% 
+  # remove 2026 since we have no mom data
+  arrange(., sample_year, eq_latitude, eq_longitude, corrected_length) %>%
+  mutate(unique_id = 1:nrow(.)) %>%
+  filter(sample_year != 2026) %>%
+  left_join(lng_moms, by = c("unique_id", "sample_year", "eq_latitude", "eq_longitude", "corrected_length"))
+
+# scale temp
+poll_temp$scale_mom_surf <- scale(poll_temp$mean_mom6_surface_temp, center = TRUE, scale = TRUE)
 ```
 
 
@@ -603,6 +624,7 @@ lngs_env <- lngs_utm %>%
 #' what do we think we're fitting here? 
 #' looking at the spatial/spatiotemporal patterns in length of pollock when accounting for yearly
 #' variability in surface temperature and doy
+
 fit.stmp <- sdmTMB(
   data = lngs_env,
   corrected_length ~ scale_doy2 + s(mean_surface_temperature, k = 4),
@@ -625,14 +647,119 @@ fit.stmp2 <- sdmTMB(
   anisotropy = TRUE
 )
 
-sanity(fit.stmp); sanity(fit.stmp2)
+# raster style fit - have to recreate mesh without 2026
+# create mesh
+mesh_temp <- make_mesh(poll_temp, c("X", "Y"), n_knots = 75)
+
+fit.mom <- sdmTMB(
+  data = poll_temp,
+  corrected_length ~ scale_doy2 + as.factor(sample_year) + scale_mom_surf,
+  mesh = mesh_temp, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE
+)
+
+# add in spline to test for nonlinear effects of temperature
+fit.mom.spline <- sdmTMB(
+  data = poll_temp,
+  corrected_length ~ scale_doy2 + as.factor(sample_year) + s(scale_mom_surf, k = 4),
+  mesh = mesh_temp, 
+  time = "sample_year", 
+  family = lognormal(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE
+)
+
+# add in a base sdmtmb model without temperature effects
+base.fit <- sdmTMB(
+  data = poll_temp,
+  corrected_length ~ scale_doy2 + as.factor(sample_year),
+  mesh = mesh_temp,
+  time = "sample_year",
+  family = lognormal(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  anisotropy = TRUE
+)
+
+sanity(fit.mom)
+sanity(fit.mom.spline)
+sanity(base.fit)
+sanity(fit.stmp)
+sanity(fit.stmp2)
+
 tidy(fit.stmp, "ran_pars"); tidy(fit.stmp2, "ran_pars")
 tidy(fit.stmp); tidy(fit.stmp2)
+
 check_gradient(fit.stmp); check_gradient(fit.stmp2)
+check_gradient(fit.mom); check_gradient(fit.mom.spline)
+check_gradient(base.fit)
+tidy(fit.mom)
 
 AIC(fit.stmp2) - AIC(fit.stmp)
 # this indicates that a spline temperature inclusion is probably better
+# looking at the moms data and inclusion of nonlinear temperature effects
+AIC(base.fit, fit.mom.spline) # base fit is larger than spline
+AIC(base.fit) - AIC(fit.mom) # the base fit and the temperature mom is pretty similar
+AIC(fit.mom) - AIC(fit.mom.spline) # there is stronger support for a model with temperature effects
+# but primarily non linear effect of temperature. 
+
+print(tidy(fit.mom.spline, "fixed"), n = 24) # the scaled temperature overlaps with 0 
+# so there while the inclusion of temperature better fits the model there is not a significant impact of temperature on length
+# after accounting for variability across space, year, and doy
+
+# how much does the model improve when temperature is included? 
+# we can look at the spatial field (sigma_0) and the spatiotemporal fields (sigma_E)
+# and compare with the base model to look at if there's a decrease in sigma_0
+# if decrease in sigma_o then *i think* it'd mean there's a spatial pattern in lengths that is driven by
+# spatial temperature differences. 
+tidy(base.fit, "ran_pars")
+tidy(fit.mom.spline, "ran_pars")
+# from the base.fit (w/o temp) sigma_O is 0.0582, w/ temp is 0.0711
+# so there is an increase in sigma_0 when temperature is included.
+# this means that the baseline spatial standar deviation increased when temperature was included. 
+# This means that after accounting for temperature, there's more residual variabiltiy associated with 
+# peristent other features in the bering sea (depth, habitat, ontogeny, prey) well maybe nto really prey
+# WHY would that happen? 
+# However both sigma_O parameters are within the sd of the other - it wasn't a statistical increase/decrease
+# in the persistent spatial pattern of pollock lengths
+
+# the sigma_E didn't chang from the base to the temp model, but the magniture of the parameter is large. 
+# indicating there is a year to year variation in the spatial length patterns of pollock. 
+# so there is something that is happening year to year that is not a persistent underlying pattern that more 
+#larger impacts where we find larger/small pollock in the Bering sea. 
+# becasue the inclusion of temperature didn't change hte sigma_E something else is driving the interannual variability we see
+# across space and size in the EBS
 ```
+ggeffects of small scale patterns in temp
+```{r}
+library(ggeffects)
+# what is the marginal effect of scaled surface temperature on length? 
+marg_surf <- ggpredict(
+  model = fit.mom.spline,
+  condition = c(scale_doy2 = scaled_median,
+                sample_year = 2022),
+  terms = "scale_mom_surf [all]"
+)
+
+plot(marg_surf)
+
+# convert back to temperature in C
+marg_surf_df <- as.data.frame(marg_surf) %>%
+  mutate(temp_c = (x * surf_sd) + surf_mean)
+
+#plot
+ggplot(marg_surf_df, aes(x = temp_c, y = predicted)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill = "gray", alpha = 0.4) +
+  geom_line(linewidth = 1.1) +
+  geom_rug(data = poll_temp, aes(x = mean_mom6_surface_temp), inherit.aes = F, sides = "b", alpha = 0.1) +
+  theme_bw()
+```
+
 
 ### model eval
 ```{r}
@@ -775,5 +902,127 @@ tmp.df %>%
   theme_minimal()
 
 plot(eff.tmp, show_data = T)
+```
+
+### predict temp grids x year
+```{r}
+tos <- readRDS("C:/Users/lia.domke/Desktop/Work/AFSC/R projects/BSpcod-lengths/tos_MOM6_1993_2025_AK.rds") %>%
+  rename(surface_temp = bottom_temp)
+
+tos$lon <- ifelse(tos$lon > 180, tos$lon - 360, tos$lon)
+
+tos_summer <- tos %>%
+    filter(month == "06"| month == "07"| month == "08" )%>%
+    filter(lon >= -180 & lon <= -130,
+           lat >= 50 & lat <= 70,
+           year > 2002) %>%
+    group_by(year, lon, lat) %>%
+  dplyr::summarise(mean_surf_temp = mean(surface_temp, na.rm = T),
+                   sd_surf_temp = sd(surface_temp, na.rm = T), .groups = "drop") %>%
+  mutate(year = as.integer(year))
+
+# convert tos to sf and make sure the epsg matches the bs.grid (32602), the grid is calculated in meters
+tos_summer_sf <- st_as_sf(tos_summer, coords = c("lon", "lat"),
+                          crs = 4326) %>%
+  st_transform(crs = 32602)
+
+# pull out coordinates
+coords_tos <- st_coordinates(tos_summer_sf)
+tos_summer_m <- tos_summer %>%
+  mutate(X = coords_tos[, "X"] / 1000,
+         Y = coords_tos[, "Y"] / 1000)
+
+head(tos_summer_m)
+
+# pull out the mean and sd of mom6 temp from the matched station grids
+surf_mean <- mean(poll_temp$mean_mom6_surface_temp, na.rm = T)
+surf_sd <- sd(poll_temp$mean_mom6_surface_temp, na.rm = T)
+
+poll_temp2 <- poll_temp %>%
+  mutate(scale_mom_surf = as.numeric(scale_mom_surf)) %>%
+  mutate(scale_mom_surf2 = (mean_mom6_surface_temp - surf_mean)/ surf_sd,
+         matches = dplyr::near(scale_mom_surf, scale_mom_surf2))
+
+table(poll_temp2$matches) # good
+
+#check to make sure its all projected correctly
+# ggplot() +
+#   geom_point(tos_summer_m, mapping = aes(x = X, y = Y, fill = mean_surf_temp)) +
+#   geom_point(lngs_utm, mapping = aes(x = X, y = Y), fill = "red")
+
+
+# previous prediction grid
+bs.grid.year.doy <- replicate_df(bs.grid.year, "scale_doy2", scaled_median) # this is at doy 248
+
+pred_years <- intersect(unique(bs.grid.year.doy$sample_year), unique(tos_summer_m$year))
+# prediction grid and include tos
+grid_list <- list()
+
+for (yr in sort(pred_years)) {
+  grid_yr <- bs.grid.year.doy %>% filter(sample_year == yr)
+  temp_yr <- tos_summer_m %>% filter(year == yr)
+  
+  # Nearest-neighbor lookup in EPSG:32602 km space
+  nn <- FNN::get.knnx(
+    data  = as.matrix(temp_yr[, c("X", "Y")]),
+    query = as.matrix(grid_yr[, c("X", "Y")]),
+    k     = 1
+  )
+  
+  grid_yr$scale_mom_surf <- temp_yr$scale_mom_surf[nn$nn.index]
+  grid_yr$mean_surf_temp <- temp_yr$mean_surf_temp[nn$nn.index]
+  grid_yr$dist_to_mom6_km  <- nn$nn.dist[, 1]
+  
+  grid_list[[as.character(yr)]] <- grid_yr
+}
+
+bs.grid.temp <- bind_rows(grid_list) %>%
+  mutate(scale_surf_temp = (mean_surf_temp - surf_mean) / surf_sd)
+
+range(bs.grid.temp$dist_to_mom6_km) # 26 is kinda far, but the buffer is 15 km
+# Check percentiles — 95% of the grid is ~ 6.2 km away
+quantile(bs.grid.temp$dist_to_mom6_km, probs = c(0.5, 0.9, 0.95, 0.99, 1.0))
+
+# Plot the points > 15 km away to verify they are just coastal edge cells
+ggplot(bs.grid.temp %>% filter(sample_year == 2021), aes(X, Y, color = dist_to_mom6_km > 15)) +
+  geom_point(size = 1) +
+  coord_equal() # only a few locations around looks like nunivak island maybe st. lawrence that makes
+# sense given that the mom6 is not calculated on land
+
+```
+
+###plot pred
+```{r}
+summary(fit.mom)
+tidy(fit.mom, pars = "ran")
+# predict annual spatial fields
+preds <- predict(fit.mom, newdata = as.data.frame(bs.grid.temp))
+preds$pred_length_cm <- exp(preds$est)
+
+preds.sf <- st_as_sf(preds, coords = c("X", "Y"), crs = 32602)
+
+ggplot() +
+  #geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = exp(est), color = exp(est)),
+          data = preds.sf, pch = 22) +
+  #geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+   #            breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude", color = "Length (mm)", fill = "Length (mm)") +
+  facet_wrap(~sample_year)
+  
+
+ggplot() +
+  #geom_sf(data = bs_cropped_wgs, fill = "gray", color = "black", inherit.aes = F) +
+  geom_sf(mapping = aes(fill = exp(omega_s), color = exp(omega_s)),
+          data = preds.sf, pch = 22) +
+  #geom_contour(data = bathline, aes(x = x +360, y = y, z = z),
+   #            breaks = c(-20, -50, -100, -150), linewidth = 0.3, colour = "black") +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(x = "Longitude", y = "Latitude", color = "Spatial deviations", fill = "Spatial deviations")
 ```
 
